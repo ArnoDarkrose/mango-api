@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 readme = "README.md"
 repository = "https://github.com/ArnoDarkrose/mango-api.git"
-licence-file = "LICENSE"
+license-file = "LICENSE"
 description = "API for the manga reading tool"
-lisence = "MIT or Apache 2.0"
 
 [dependencies]
 reqwest = "0.12.9"
