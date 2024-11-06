@@ -29,3 +29,19 @@ pub struct Chapter {
 }
 
 impl Entity for Chapter {}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterMeta {
+    pub hash: String,
+    pub data: Vec<String>,
+    pub data_saver: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterDownloadMeta {
+    pub result: String,
+    pub base_url: String,
+    pub chapter: ChapterMeta,
+}

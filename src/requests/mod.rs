@@ -2,6 +2,7 @@ pub mod chapter;
 pub mod manga;
 pub mod tag;
 
+use bytes::Bytes;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,12 +11,16 @@ use thiserror::Error;
 use std::collections::HashMap;
 use std::default::Default;
 
-use chapter::Chapter;
+use chapter::{Chapter, ChapterDownloadMeta};
 use manga::{Manga, MangaStatus};
 use tag::{Tag, TagsMode};
 
 pub trait Entity {}
 pub trait Query: Serialize {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Copy)]
+pub struct EmptyQuery {}
+impl Query for EmptyQuery {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -471,6 +476,53 @@ impl MangaClient {
 
         MangaClient::parse_respond(resp).await
     }
+
+    pub async fn get_chapter_download_meta(&self, id: String) -> Result<ChapterDownloadMeta> {
+        let mut resp: Value = self
+            .query(
+                &format!("{}/at-home/server/{id}", MangaClient::BASE_URL),
+                &EmptyQuery {},
+            )
+            .await?
+            .json()
+            .await?;
+
+        let result = match resp.get("result") {
+            Some(status) => status,
+            None => return Err(Error::ParseError),
+        };
+
+        let responded_without_errors;
+
+        if result.is_string() {
+            let result = result.as_str().expect("verified to be a string");
+
+            if result == "ok" {
+                responded_without_errors = true;
+            } else {
+                responded_without_errors = false;
+            }
+        } else {
+            return Err(Error::ParseError);
+        }
+
+        if responded_without_errors {
+            Ok(serde_json::from_value(resp)?)
+        } else {
+            Err(Error::BadResponseError(serde_json::from_value::<
+                Vec<BadResponseError>,
+            >(
+                resp["errors"].take()
+            )?))
+        }
+    }
+
+    pub async fn download_page(&self, url: &str) -> Result<Bytes> {
+        match self.query(url, &EmptyQuery {}).await?.bytes().await {
+            Ok(res) => Ok(res),
+            Err(e) => Err(Error::RequestError(e)),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -535,26 +587,62 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_queries() {
-        let client = reqwest::Client::builder()
-            .user_agent("Mango/1.0")
-            .build()
-            .unwrap();
+    async fn test_chapter_download() {
+        let client = MangaClient::new().unwrap();
 
-        let data = MangaQuery {
-            status: Some(vec![MangaStatus::Completed]),
+        let chainsaw_manga_id = client
+            .search_manga(&MangaQuery {
+                title: Some("Chainsaw Man".to_string()),
+                available_translated_language: Some(vec![Locale::En]),
+                ..Default::default()
+            })
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
             ..Default::default()
         };
-        let data = serde_qs::to_string(&data).unwrap();
 
-        let url = format!("{}/manga?{data}", MangaClient::BASE_URL);
+        let chapters = client
+            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .await
+            .unwrap();
 
-        println!("{data:#?}");
-        let resp: Value = client.get(url).send().await.unwrap().json().await.unwrap();
+        let mut out = std::fs::File::create("chapters_meta").unwrap();
 
-        for entry in resp["data"].as_array().unwrap() {
-            println!("{:#?}", entry["attributes"]["status"])
+        let id = chapters[2].id.clone();
+
+        let download_meta = client.get_chapter_download_meta(id).await.unwrap();
+
+        out.write(format!("{download_meta:#?}\n").as_bytes())
+            .unwrap();
+
+        let base_url = format!(
+            "{}/data/{}",
+            download_meta.base_url, download_meta.chapter.hash
+        );
+
+        if !std::fs::exists("pages").unwrap() {
+            std::fs::create_dir("pages").unwrap();
+        }
+        for (i, page_url) in kdam::tqdm!(download_meta.chapter.data.into_iter().enumerate().take(3))
+        {
+            let bytes = client
+                .download_page(&format!("{base_url}/{page_url}"))
+                .await
+                .unwrap();
+
+            let mut out_page = std::fs::File::create(format!("pages/{i}.png")).unwrap();
+
+            out_page.write(&bytes).unwrap();
         }
     }
 }
