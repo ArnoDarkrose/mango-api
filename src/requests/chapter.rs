@@ -10,7 +10,7 @@ pub struct ChapterAttributes {
     pub chapter: Option<String>,
     pub pages: usize,
     pub translated_language: Locale,
-    pub uploader: String,
+    pub uploader: Option<String>,
     pub external_url: Option<String>,
     pub version: usize,
     pub created_at: String,
@@ -22,6 +22,7 @@ pub struct ChapterAttributes {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chapter {
     pub id: String,
+    #[serde(rename = "type")]
     pub entity_type: EntityType,
     pub attributes: ChapterAttributes,
     pub relationships: Vec<Relationship>,

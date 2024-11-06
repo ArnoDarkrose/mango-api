@@ -15,6 +15,7 @@ use manga::{Manga, MangaStatus};
 use tag::{Tag, TagsMode};
 
 pub trait Entity {}
+pub trait Query: Serialize {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -44,6 +45,8 @@ pub struct MangaQuery {
     pub has_available_chapters: Option<String>,
     pub group: Option<String>,
 }
+
+impl Query for MangaQuery {}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, std::hash::Hash, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -277,6 +280,7 @@ pub enum MangaRelation {
     Serialization,
 }
 
+// TODO: change rename(deserialize) to just rename for both
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Relationship {
     id: String,
@@ -363,6 +367,19 @@ impl MangaClient {
         })
     }
 
+    pub async fn query(&self, base_url: &str, query: &impl Query) -> Result<Response> {
+        let query_data = match serde_qs::to_string(query) {
+            Ok(res) => res,
+            Err(e) => return Err(Error::QsError(e)),
+        };
+
+        let url = format!("{base_url}?{query_data}");
+        match self.client.get(url).send().await {
+            Ok(res) => Ok(res),
+            Err(e) => Err(Error::RequestError(e)),
+        }
+    }
+
     pub async fn parse_respond<T>(mut resp: Value) -> Result<Vec<T>>
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
@@ -405,21 +422,12 @@ impl MangaClient {
         }
     }
 
-    pub async fn query_manga(&self, data: &MangaQuery) -> Result<Response> {
-        let data = match serde_qs::to_string(data) {
-            Ok(res) => res,
-            Err(e) => return Err(Error::QsError(e)),
-        };
-
-        let url = format!("{}/manga?{data}", MangaClient::BASE_URL);
-        match self.client.get(url).send().await {
-            Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
-        }
-    }
-
     pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
-        let resp: Value = self.query_manga(data).await?.json().await?;
+        let resp: Value = self
+            .query(&format!("{}/manga", MangaClient::BASE_URL), data)
+            .await?
+            .json()
+            .await?;
 
         MangaClient::parse_respond(resp).await
     }
@@ -454,7 +462,6 @@ impl MangaClient {
 #[cfg(test)]
 mod tests {
     use super::manga::*;
-    use super::tag::*;
     use super::*;
 
     use std::io::prelude::*;
@@ -479,11 +486,17 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_get_manga_feed() {
         let client = MangaClient::new().unwrap();
 
-        let chainsaw_manga_id = client.search_manga_by_name("Chaisaw Man").await.unwrap()[0]
+        let chainsaw_manga_id = client
+            .search_manga(&MangaQuery {
+                title: Some("Chainsaw Man".to_string()),
+                available_translated_language: Some(vec![Locale::En]),
+                ..Default::default()
+            })
+            .await
+            .unwrap()[0]
             .id
             .clone();
 
@@ -492,6 +505,11 @@ mod tests {
         let mut out = std::fs::File::create("chapters_struct").unwrap();
 
         out.write(format!("{chapters:#?}").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn test_size() {
+        println!("{}", size_of::<Locale>());
     }
 
     #[tokio::test]
