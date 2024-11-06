@@ -40,13 +40,35 @@ pub struct MangaQuery {
     pub content_rating: Option<Vec<ContentRating>>,
     pub created_at_since: Option<String>,
     pub updated_at_since: Option<String>,
-    pub order: Option<Vec<SortingOptions>>,
+    pub order: Option<SortingOptions>,
     pub includes: Option<Value>,
     pub has_available_chapters: Option<String>,
     pub group: Option<String>,
 }
 
 impl Query for MangaQuery {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MangaFeedQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub translated_language: Option<Vec<Locale>>,
+    pub original_language: Option<Vec<Locale>>,
+    pub excluded_original_language: Option<Vec<Locale>>,
+    pub content_rating: Option<Vec<ContentRating>>,
+    pub excluded_groups: Option<Vec<String>>,
+    pub include_future_updates: Option<String>,
+    pub created_at_since: Option<String>,
+    pub updated_at_since: Option<String>,
+    pub publish_at_since: Option<String>,
+    pub order: Option<SortingOptions>,
+    pub includes: Option<Value>,
+    pub include_empty_pages: Option<usize>,
+    pub include_future_publish_at: Option<usize>,
+    pub include_external_url: Option<usize>,
+}
+impl Query for MangaFeedQuery {}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, std::hash::Hash, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -280,11 +302,10 @@ pub enum MangaRelation {
     Serialization,
 }
 
-// TODO: change rename(deserialize) to just rename for both
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Relationship {
     id: String,
-    #[serde(rename(deserialize = "type"))]
+    #[serde(rename = "type")]
     entity_type: EntityType,
     related: Option<MangaRelation>,
     attributes: Option<Value>,
@@ -307,6 +328,7 @@ pub enum OrderOption {
     LatestUploadedChapter,
     FollowedCount,
     Relevance,
+    Chapter,
 }
 
 pub type SortingOptions = HashMap<OrderOption, Order>;
@@ -440,20 +462,12 @@ impl MangaClient {
         .await
     }
 
-    pub async fn query_manga_feed(&self, id: String) -> Result<Response> {
-        match self
-            .client
-            .get(format!("{}/manga/{id}/feed", MangaClient::BASE_URL))
-            .send()
-            .await
-        {
-            Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
-        }
-    }
-
-    pub async fn get_manga_feed(&self, id: String) -> Result<Vec<Chapter>> {
-        let resp: Value = self.query_manga_feed(id).await?.json().await?;
+    pub async fn get_manga_feed(&self, id: String, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
+        let resp: Value = self
+            .query(&format!("{}/manga/{id}/feed", MangaClient::BASE_URL), data)
+            .await?
+            .json()
+            .await?;
 
         MangaClient::parse_respond(resp).await
     }
@@ -500,16 +514,24 @@ mod tests {
             .id
             .clone();
 
-        let chapters = client.get_manga_feed(chainsaw_manga_id).await.unwrap();
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
+            ..Default::default()
+        };
+
+        let chapters = client
+            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .await
+            .unwrap();
 
         let mut out = std::fs::File::create("chapters_struct").unwrap();
 
         out.write(format!("{chapters:#?}").as_bytes()).unwrap();
-    }
-
-    #[test]
-    fn test_size() {
-        println!("{}", size_of::<Locale>());
     }
 
     #[tokio::test]
