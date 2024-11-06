@@ -4,7 +4,8 @@ use std::collections::HashMap;
 
 use super::tag::Tag;
 use super::{
-    ContentRating, EntityType, Locale, LocalizedString, PublicationDemographic, Relationship,
+    ContentRating, Entity, EntityType, Locale, LocalizedString, PublicationDemographic,
+    Relationship,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -47,33 +48,35 @@ pub enum MangaState {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MangaAttributes {
-    title: LocalizedString,
-    alt_titles: Vec<LocalizedString>,
-    description: LocalizedString,
-    is_locked: bool,
-    links: MangaLinks,
-    original_language: Locale,
-    last_volume: Option<String>,
-    last_chapter: Option<String>,
-    publication_demographic: Option<PublicationDemographic>,
-    status: MangaStatus,
-    year: Option<isize>,
-    content_rating: ContentRating,
-    chapter_numbers_reset_on_new_volume: bool,
-    available_translated_languages: Vec<Locale>,
-    latest_uploaded_chapter: String,
-    tags: Vec<Tag>,
-    state: MangaState,
-    version: usize,
-    created_at: String,
-    updated_at: String,
+    pub title: LocalizedString,
+    pub alt_titles: Vec<LocalizedString>,
+    pub description: LocalizedString,
+    pub is_locked: bool,
+    pub links: MangaLinks,
+    pub original_language: Locale,
+    pub last_volume: Option<String>,
+    pub last_chapter: Option<String>,
+    pub publication_demographic: Option<PublicationDemographic>,
+    pub status: MangaStatus,
+    pub year: Option<isize>,
+    pub content_rating: ContentRating,
+    pub chapter_numbers_reset_on_new_volume: bool,
+    pub available_translated_languages: Vec<Locale>,
+    pub latest_uploaded_chapter: String,
+    pub tags: Vec<Tag>,
+    pub state: MangaState,
+    pub version: usize,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Manga {
-    id: String,
+    pub id: String,
     #[serde(rename(deserialize = "type"))]
-    entity_type: EntityType,
-    attributes: MangaAttributes,
-    relationships: Vec<Relationship>,
+    pub entity_type: EntityType,
+    pub attributes: MangaAttributes,
+    pub relationships: Vec<Relationship>,
 }
+
+impl Entity for Manga {}

@@ -13,19 +13,19 @@ pub enum TagGroup {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct TagAttributes {
-    name: LocalizedString,
-    description: LocalizedString,
-    group: TagGroup,
-    version: usize,
+    pub name: LocalizedString,
+    pub description: LocalizedString,
+    pub group: TagGroup,
+    pub version: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Tag {
-    id: String,
+    pub id: String,
     #[serde(rename(deserialize = "type"))]
-    entity_type: EntityType,
-    attributes: TagAttributes,
-    relationships: Vec<Relationship>,
+    pub entity_type: EntityType,
+    pub attributes: TagAttributes,
+    pub relationships: Vec<Relationship>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -1,4 +1,3 @@
-pub mod chapter;
 pub mod manga;
 pub mod tag;
 
@@ -10,11 +9,8 @@ use thiserror::Error;
 use std::collections::HashMap;
 use std::default::Default;
 
-use chapter::Chapter;
 use manga::{Manga, MangaStatus};
 use tag::{Tag, TagsMode};
-
-pub trait Entity {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
@@ -23,22 +19,36 @@ pub struct MangaQuery {
     pub offset: Option<usize>,
     pub title: Option<String>,
     pub author_or_artist: Option<String>,
+    #[serde(rename = "authors[]")]
     pub authors: Option<Vec<String>>,
+    #[serde(rename = "artists[]")]
     pub artists: Option<Vec<String>>,
     pub year: Option<usize>,
+    #[serde(rename = "includedTags[]")]
     pub included_tags: Option<Vec<Tag>>,
+    #[serde(rename = "includedTagsMode[]")]
     pub included_tags_mode: Option<TagsMode>,
+    #[serde(rename = "excludedTags[]")]
     pub excluded_tags: Option<Vec<Tag>>,
+    #[serde(rename = "excludedTagsMode[]")]
     pub excluded_tags_mode: Option<TagsMode>,
+    #[serde(rename = "status[]")]
     pub status: Option<Vec<MangaStatus>>,
+    #[serde(rename = "originalLanguage[]")]
     pub original_language: Option<Vec<Locale>>,
+    #[serde(rename = "excludedOriginalLanguage[]")]
     pub excluded_original_language: Option<Vec<Locale>>,
+    #[serde(rename = "availableTrandlatedLanguage[]")]
     pub available_translated_language: Option<Vec<Locale>>,
+    #[serde(rename = "publicationDemographic[]")]
     pub publication_demographic: Option<Vec<PublicationDemographic>>,
+    #[serde(rename = "ids[]")]
     pub ids: Option<Vec<String>>,
+    #[serde(rename = "contentRating[]")]
     pub content_rating: Option<Vec<ContentRating>>,
     pub created_at_since: Option<String>,
     pub updated_at_since: Option<String>,
+    #[serde(rename = "order[]")]
     pub order: Option<Vec<SortingOptions>>,
     pub includes: Option<Value>,
     pub has_available_chapters: Option<String>,
@@ -163,7 +173,6 @@ pub enum Locale {
     No,
     Nb,
     Nn,
-    Nl,
     Oc,
     Oj,
     Or,
@@ -344,8 +353,6 @@ pub enum Error {
     ParseError,
     #[error("400 server respond")]
     BadResponseError(Vec<BadResponseError>),
-    #[error(transparent)]
-    QsError(#[from] serde_qs::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -363,10 +370,18 @@ impl MangaClient {
         })
     }
 
-    pub async fn parse_respond<T>(mut resp: Value) -> Result<Vec<T>>
-    where
-        for<'a> T: Entity + Deserialize<'a> + Serialize,
-    {
+    pub async fn query_manga(&self, data: &MangaQuery) -> reqwest::Result<Response> {
+        self.client
+            .get(format!("{}/manga", MangaClient::BASE_URL))
+            .json(data)
+            .send()
+            .await
+    }
+
+    pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
+        let mut resp: Value = self.query_manga(data).await?.json().await?;
+        // let mut resp: Value = self.query_manga(data).await.unwrap().json().await?;
+
         let result = match resp.get("result") {
             Some(status) => status,
             None => return Err(Error::ParseError),
@@ -392,7 +407,7 @@ impl MangaClient {
                 None => return Err(Error::ParseError),
             };
 
-            Ok(serde_json::from_value::<Vec<T>>(data.take())?)
+            Ok(serde_json::from_value(data.take())?)
         } else {
             let errors = match resp.get_mut("errors") {
                 Some(d) => d,
@@ -403,51 +418,6 @@ impl MangaClient {
 
             Err(Error::BadResponseError(err))
         }
-    }
-
-    pub async fn query_manga(&self, data: &MangaQuery) -> Result<Response> {
-        let data = match serde_qs::to_string(data) {
-            Ok(res) => res,
-            Err(e) => return Err(Error::QsError(e)),
-        };
-
-        let url = format!("{}/manga?{data}", MangaClient::BASE_URL);
-        match self.client.get(url).send().await {
-            Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
-        }
-    }
-
-    pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
-        let resp: Value = self.query_manga(data).await?.json().await?;
-
-        MangaClient::parse_respond(resp).await
-    }
-
-    pub async fn search_manga_by_name(&self, name: &str) -> Result<Vec<Manga>> {
-        self.search_manga(&MangaQuery {
-            title: Some(name.to_string()),
-            ..Default::default()
-        })
-        .await
-    }
-
-    pub async fn query_manga_feed(&self, id: String) -> Result<Response> {
-        match self
-            .client
-            .get(format!("{}/manga/{id}/feed", MangaClient::BASE_URL))
-            .send()
-            .await
-        {
-            Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
-        }
-    }
-
-    pub async fn get_manga_feed(&self, id: String) -> Result<Vec<Chapter>> {
-        let resp: Value = self.query_manga_feed(id).await?.json().await?;
-
-        MangaClient::parse_respond(resp).await
     }
 }
 
@@ -460,13 +430,14 @@ mod tests {
     use std::io::prelude::*;
 
     #[tokio::test]
+    #[ignore]
     async fn test_find_by_name() {
         let client = MangaClient::new().unwrap();
         let resp = client
             .search_manga(&MangaQuery {
-                // title: Some("Chainsaw man".to_string()),
-                status: Some(vec![MangaStatus::Ongoing]),
-                year: Some(2015),
+                title: Some("Chainsaw man".to_string()),
+                // status: Some(vec![MangaStatus::Completed]),
+                // year: Some(2015),
                 // original_language: Some(vec![Locale::En]),
                 ..Default::default()
             })
@@ -479,31 +450,17 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
-    async fn test_get_manga_feed() {
-        let client = MangaClient::new().unwrap();
-
-        let chainsaw_manga_id = client.search_manga_by_name("Chaisaw Man").await.unwrap()[0]
-            .id
-            .clone();
-
-        let chapters = client.get_manga_feed(chainsaw_manga_id).await.unwrap();
-
-        let mut out = std::fs::File::create("chapters_struct").unwrap();
-
-        out.write(format!("{chapters:#?}").as_bytes()).unwrap();
-    }
-
-    #[tokio::test]
-    #[ignore]
     async fn test_queries() {
         let client = reqwest::Client::builder()
             .user_agent("Mango/1.0")
             .build()
             .unwrap();
 
-        let data = MangaQuery {
-            status: Some(vec![MangaStatus::Completed]),
+        // let mut data = HashMap::new();
+        // data.insert("status", ["ongoing"]);
+
+        let mut data = MangaQuery {
+            status: vec!["ongoing"],
             ..Default::default()
         };
         let data = serde_qs::to_string(&data).unwrap();
