@@ -431,8 +431,7 @@ impl MangoClient {
         .await
     }
 
-    // TODO: change this and similar methods to accept &str instead of String
-    pub async fn get_manga_feed(&self, id: String, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
+    pub async fn get_manga_feed(&self, id: &str, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
         let resp: Value = self
             .query(&format!("{}/manga/{id}/feed", MangoClient::BASE_URL), data)
             .await?
@@ -442,7 +441,7 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
-    pub async fn get_chapter_download_meta(&self, id: String) -> Result<ChapterDownloadMeta> {
+    pub async fn get_chapter_download_meta(&self, id: &str) -> Result<ChapterDownloadMeta> {
         let mut resp: Value = self
             .query(
                 &format!("{}/at-home/server/{id}", MangoClient::BASE_URL),
@@ -465,7 +464,7 @@ impl MangoClient {
         }
     }
 
-    pub async fn get_scanlation_group(&self, id: String) -> Result<ScanlationGroup> {
+    pub async fn get_scanlation_group(&self, id: &str) -> Result<ScanlationGroup> {
         let resp: Value = self
             .query(
                 &format!("{}/group/{id}", MangoClient::BASE_URL),
@@ -492,7 +491,7 @@ impl MangoClient {
         query.limit = Some(30);
 
         let buf = Box::new(
-            rt.block_on(async { self.get_manga_feed(manga_id.to_string(), &query).await })?
+            rt.block_on(async { self.get_manga_feed(manga_id, &query).await })?
                 .into_iter(),
         );
 
@@ -525,7 +524,7 @@ impl Iterator for Feed {
         } else {
             match self.rt.block_on(async {
                 self.client
-                    .get_manga_feed(self.manga_id.to_string(), &self.query)
+                    .get_manga_feed(&self.manga_id, &self.query)
                     .await
             }) {
                 Ok(res) => {
@@ -594,7 +593,7 @@ mod tests {
         };
 
         let chapters = client
-            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .get_manga_feed(&chainsaw_manga_id, &query_data)
             .await
             .unwrap();
 
@@ -629,7 +628,7 @@ mod tests {
         };
 
         let chapters = client
-            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .get_manga_feed(&chainsaw_manga_id, &query_data)
             .await
             .unwrap();
 
@@ -637,7 +636,7 @@ mod tests {
 
         let id = chapters[2].id.clone();
 
-        let download_meta = client.get_chapter_download_meta(id).await.unwrap();
+        let download_meta = client.get_chapter_download_meta(&id).await.unwrap();
 
         out.write(format!("{download_meta:#?}\n").as_bytes())
             .unwrap();
@@ -689,7 +688,7 @@ mod tests {
         };
 
         let chapters = client
-            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .get_manga_feed(&chainsaw_manga_id, &query_data)
             .await
             .unwrap();
 
@@ -710,7 +709,7 @@ mod tests {
         let scanlation_group_id = scanlation_group_id.unwrap();
 
         let scanlation_group = client
-            .get_scanlation_group(scanlation_group_id)
+            .get_scanlation_group(&scanlation_group_id)
             .await
             .unwrap();
 
@@ -751,7 +750,7 @@ mod tests {
         };
 
         let chapters = client
-            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .get_manga_feed(&chainsaw_manga_id, &query_data)
             .await
             .unwrap();
 
