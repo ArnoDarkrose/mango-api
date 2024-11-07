@@ -6,77 +6,24 @@ pub mod tag;
 use bytes::Bytes;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use thiserror::Error;
 
 use std::collections::HashMap;
 use std::default::Default;
 
 use chapter::{Chapter, ChapterDownloadMeta};
-use manga::{Manga, MangaStatus};
+use manga::{Manga, MangaFeedQuery, MangaQuery};
 use scanlation_group::ScanlationGroup;
-use tag::{Tag, TagsMode};
 
 pub trait Entity {}
+impl<T: Entity> Entity for Vec<T> {}
+
 pub trait Query: Serialize {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, Copy)]
 pub struct EmptyQuery {}
 impl Query for EmptyQuery {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MangaQuery {
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-    pub title: Option<String>,
-    pub author_or_artist: Option<String>,
-    pub authors: Option<Vec<String>>,
-    pub artists: Option<Vec<String>>,
-    pub year: Option<usize>,
-    pub included_tags: Option<Vec<Tag>>,
-    pub included_tags_mode: Option<TagsMode>,
-    pub excluded_tags: Option<Vec<Tag>>,
-    pub excluded_tags_mode: Option<TagsMode>,
-    pub status: Option<Vec<MangaStatus>>,
-    pub original_language: Option<Vec<Locale>>,
-    pub excluded_original_language: Option<Vec<Locale>>,
-    pub available_translated_language: Option<Vec<Locale>>,
-    pub publication_demographic: Option<Vec<PublicationDemographic>>,
-    pub ids: Option<Vec<String>>,
-    pub content_rating: Option<Vec<ContentRating>>,
-    pub created_at_since: Option<String>,
-    pub updated_at_since: Option<String>,
-    pub order: Option<SortingOptions>,
-    pub includes: Option<Value>,
-    pub has_available_chapters: Option<String>,
-    pub group: Option<String>,
-}
-
-impl Query for MangaQuery {}
-
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct MangaFeedQuery {
-    pub limit: Option<usize>,
-    pub offset: Option<usize>,
-    pub translated_language: Option<Vec<Locale>>,
-    pub original_language: Option<Vec<Locale>>,
-    pub excluded_original_language: Option<Vec<Locale>>,
-    pub content_rating: Option<Vec<ContentRating>>,
-    pub excluded_groups: Option<Vec<String>>,
-    pub include_future_updates: Option<String>,
-    pub created_at_since: Option<String>,
-    pub updated_at_since: Option<String>,
-    pub publish_at_since: Option<String>,
-    pub order: Option<SortingOptions>,
-    pub includes: Option<Value>,
-    pub include_empty_pages: Option<usize>,
-    pub include_future_publish_at: Option<usize>,
-    pub include_external_url: Option<usize>,
-}
-
-impl Query for MangaFeedQuery {}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, std::hash::Hash, Clone)]
 #[serde(rename_all = "kebab-case")]
@@ -384,6 +331,35 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+pub trait ResultOk {
+    fn result_ok(&self) -> Result<bool>;
+}
+
+impl ResultOk for Value {
+    fn result_ok(&self) -> Result<bool> {
+        let result = match self.get("result") {
+            Some(status) => status,
+            None => return Err(Error::ParseError),
+        };
+
+        let responded_without_errors;
+
+        if result.is_string() {
+            let result = result.as_str().expect("verified to be a string");
+
+            if result == "ok" {
+                responded_without_errors = true;
+            } else {
+                responded_without_errors = false;
+            }
+        } else {
+            return Err(Error::ParseError);
+        }
+
+        Ok(responded_without_errors)
+    }
+}
+
 pub struct MangaClient {
     client: Client,
 }
@@ -410,29 +386,11 @@ impl MangaClient {
         }
     }
 
-    // TODO: make this function usable not only for requests that return Vec
-    pub async fn parse_respond<T>(mut resp: Value) -> Result<Vec<T>>
+    pub async fn parse_respond_data<T>(mut resp: Value) -> Result<T>
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
     {
-        let result = match resp.get("result") {
-            Some(status) => status,
-            None => return Err(Error::ParseError),
-        };
-
-        let responded_without_errors;
-
-        if result.is_string() {
-            let result = result.as_str().expect("verified to be a string");
-
-            if result == "ok" {
-                responded_without_errors = true;
-            } else {
-                responded_without_errors = false;
-            }
-        } else {
-            return Err(Error::ParseError);
-        }
+        let responded_without_errors = resp.result_ok()?;
 
         if responded_without_errors {
             let data = match resp.get_mut("data") {
@@ -440,7 +398,7 @@ impl MangaClient {
                 None => return Err(Error::ParseError),
             };
 
-            Ok(serde_json::from_value::<Vec<T>>(data.take())?)
+            Ok(serde_json::from_value::<T>(data.take())?)
         } else {
             let errors = match resp.get_mut("errors") {
                 Some(d) => d,
@@ -460,7 +418,7 @@ impl MangaClient {
             .json()
             .await?;
 
-        MangaClient::parse_respond(resp).await
+        MangaClient::parse_respond_data(resp).await
     }
 
     pub async fn search_manga_by_name(&self, name: &str) -> Result<Vec<Manga>> {
@@ -478,7 +436,7 @@ impl MangaClient {
             .json()
             .await?;
 
-        MangaClient::parse_respond(resp).await
+        MangaClient::parse_respond_data(resp).await
     }
 
     pub async fn get_chapter_download_meta(&self, id: String) -> Result<ChapterDownloadMeta> {
@@ -491,24 +449,7 @@ impl MangaClient {
             .json()
             .await?;
 
-        let result = match resp.get("result") {
-            Some(status) => status,
-            None => return Err(Error::ParseError),
-        };
-
-        let responded_without_errors;
-
-        if result.is_string() {
-            let result = result.as_str().expect("verified to be a string");
-
-            if result == "ok" {
-                responded_without_errors = true;
-            } else {
-                responded_without_errors = false;
-            }
-        } else {
-            return Err(Error::ParseError);
-        }
+        let responded_without_errors = resp.result_ok()?;
 
         if responded_without_errors {
             Ok(serde_json::from_value(resp)?)
@@ -522,7 +463,7 @@ impl MangaClient {
     }
 
     pub async fn get_scanlation_group(&self, id: String) -> Result<ScanlationGroup> {
-        let mut resp: Value = self
+        let resp: Value = self
             .query(
                 &format!("{}/group/{id}", MangaClient::BASE_URL),
                 &EmptyQuery {},
@@ -531,42 +472,7 @@ impl MangaClient {
             .json()
             .await?;
 
-        let result = match resp.get("result") {
-            Some(status) => status,
-            None => return Err(Error::ParseError),
-        };
-
-        let responded_without_errors;
-
-        if result.is_string() {
-            let result = result.as_str().expect("verified to be a string");
-
-            if result == "ok" {
-                responded_without_errors = true;
-            } else {
-                responded_without_errors = false;
-            }
-        } else {
-            return Err(Error::ParseError);
-        }
-
-        if responded_without_errors {
-            let data = match resp.get_mut("data") {
-                Some(d) => d,
-                None => return Err(Error::ParseError),
-            };
-
-            Ok(serde_json::from_value::<ScanlationGroup>(data.take())?)
-        } else {
-            let errors = match resp.get_mut("errors") {
-                Some(d) => d,
-                None => return Err(Error::ParseError),
-            };
-
-            let err: Vec<BadResponseError> = serde_json::from_value(errors.take())?;
-
-            Err(Error::BadResponseError(err))
-        }
+        MangaClient::parse_respond_data(resp).await
     }
 
     pub async fn download_page(&self, url: &str) -> Result<Bytes> {

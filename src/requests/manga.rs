@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use std::collections::HashMap;
 
-use super::tag::Tag;
+use super::tag::{Tag, TagsMode};
 use super::{
-    ContentRating, Entity, EntityType, Locale, LocalizedString, PublicationDemographic,
-    Relationship,
+    ContentRating, Entity, EntityType, Locale, LocalizedString, PublicationDemographic, Query,
+    Relationship, SortingOptions,
 };
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -80,3 +81,57 @@ pub struct Manga {
 }
 
 impl Entity for Manga {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MangaQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub title: Option<String>,
+    pub author_or_artist: Option<String>,
+    pub authors: Option<Vec<String>>,
+    pub artists: Option<Vec<String>>,
+    pub year: Option<usize>,
+    pub included_tags: Option<Vec<Tag>>,
+    pub included_tags_mode: Option<TagsMode>,
+    pub excluded_tags: Option<Vec<Tag>>,
+    pub excluded_tags_mode: Option<TagsMode>,
+    pub status: Option<Vec<MangaStatus>>,
+    pub original_language: Option<Vec<Locale>>,
+    pub excluded_original_language: Option<Vec<Locale>>,
+    pub available_translated_language: Option<Vec<Locale>>,
+    pub publication_demographic: Option<Vec<PublicationDemographic>>,
+    pub ids: Option<Vec<String>>,
+    pub content_rating: Option<Vec<ContentRating>>,
+    pub created_at_since: Option<String>,
+    pub updated_at_since: Option<String>,
+    pub order: Option<SortingOptions>,
+    pub includes: Option<Value>,
+    pub has_available_chapters: Option<String>,
+    pub group: Option<String>,
+}
+
+impl Query for MangaQuery {}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MangaFeedQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub translated_language: Option<Vec<Locale>>,
+    pub original_language: Option<Vec<Locale>>,
+    pub excluded_original_language: Option<Vec<Locale>>,
+    pub content_rating: Option<Vec<ContentRating>>,
+    pub excluded_groups: Option<Vec<String>>,
+    pub include_future_updates: Option<String>,
+    pub created_at_since: Option<String>,
+    pub updated_at_since: Option<String>,
+    pub publish_at_since: Option<String>,
+    pub order: Option<SortingOptions>,
+    pub includes: Option<Value>,
+    pub include_empty_pages: Option<usize>,
+    pub include_future_publish_at: Option<usize>,
+    pub include_external_url: Option<usize>,
+}
+
+impl Query for MangaFeedQuery {}
