@@ -327,6 +327,8 @@ pub enum Error {
     BadResponseError(Vec<BadResponseError>),
     #[error(transparent)]
     QsError(#[from] serde_qs::Error),
+    #[error(transparent)]
+    IoError(#[from] std::io::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -429,6 +431,7 @@ impl MangoClient {
         .await
     }
 
+    // TODO: change this and similar methods to accept &str instead of String
     pub async fn get_manga_feed(&self, id: String, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
         let resp: Value = self
             .query(&format!("{}/manga/{id}/feed", MangoClient::BASE_URL), data)
@@ -479,6 +482,62 @@ impl MangoClient {
         match self.query(url, &EmptyQuery {}).await?.bytes().await {
             Ok(res) => Ok(res),
             Err(e) => Err(Error::RequestError(e)),
+        }
+    }
+
+    pub fn feed_iter(self, manga_id: &str, mut query: MangaFeedQuery) -> Result<Feed> {
+        let rt = tokio::runtime::Runtime::new()?;
+
+        query.offset = Some(0);
+        query.limit = Some(30);
+
+        let buf = Box::new(
+            rt.block_on(async { self.get_manga_feed(manga_id.to_string(), &query).await })?
+                .into_iter(),
+        );
+
+        Ok(Feed {
+            manga_id: manga_id.to_string(),
+            query,
+            client: self,
+            buf,
+            rt,
+        })
+    }
+}
+
+pub struct Feed {
+    manga_id: String,
+    query: MangaFeedQuery,
+    client: MangoClient,
+    buf: Box<dyn Iterator<Item = Chapter>>,
+    rt: tokio::runtime::Runtime,
+}
+
+impl Iterator for Feed {
+    type Item = Result<Chapter>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let next_bufferized = self.buf.next();
+
+        if let Some(res) = next_bufferized {
+            Some(Ok(res))
+        } else {
+            match self.rt.block_on(async {
+                self.client
+                    .get_manga_feed(self.manga_id.to_string(), &self.query)
+                    .await
+            }) {
+                Ok(res) => {
+                    self.buf = Box::new(res.into_iter());
+                    self.query.offset =
+                        Some(self.query.offset.expect("initialized with some") + 20);
+
+                    Some(Ok(self.buf.next()?))
+                }
+
+                Err(e) => Some(Err(e)),
+            }
         }
     }
 }
@@ -699,5 +758,50 @@ mod tests {
         let mut out = std::fs::File::create("test_pages").unwrap();
 
         out.write(format!("{chapters:#?}").as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn test_iter() {
+        let client = MangoClient::new().unwrap();
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let chainsaw_manga_id = rt.block_on(async {
+            client
+                .search_manga(&MangaQuery {
+                    title: Some("Chainsaw Man".to_string()),
+                    available_translated_language: Some(vec![Locale::En]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()[0]
+                .id
+                .clone()
+        });
+
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
+            // limit: Some(2),
+            // offset: Some(1),
+            excluded_groups: Some(vec![
+                "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb".to_string(),
+                "a38fc704-90ab-452f-9336-59d84997a9ce".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let iter = client.feed_iter(&chainsaw_manga_id, query_data).unwrap();
+
+        let mut out = std::fs::File::create("test_iter").unwrap();
+
+        for chapter in iter {
+            out.write(format!("{:#?}\n", chapter.unwrap()).as_bytes())
+                .unwrap();
+        }
     }
 }
