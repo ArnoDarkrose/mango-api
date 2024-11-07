@@ -1,11 +1,12 @@
 pub mod chapter;
 pub mod manga;
+pub mod scanlation_group;
 pub mod tag;
 
 use bytes::Bytes;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use thiserror::Error;
 
 use std::collections::HashMap;
@@ -13,6 +14,7 @@ use std::default::Default;
 
 use chapter::{Chapter, ChapterDownloadMeta};
 use manga::{Manga, MangaStatus};
+use scanlation_group::ScanlationGroup;
 use tag::{Tag, TagsMode};
 
 pub trait Entity {}
@@ -73,6 +75,7 @@ pub struct MangaFeedQuery {
     pub include_future_publish_at: Option<usize>,
     pub include_external_url: Option<usize>,
 }
+
 impl Query for MangaFeedQuery {}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Debug, std::hash::Hash, Clone)]
@@ -407,6 +410,7 @@ impl MangaClient {
         }
     }
 
+    // TODO: make this function usable not only for requests that return Vec
     pub async fn parse_respond<T>(mut resp: Value) -> Result<Vec<T>>
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
@@ -517,6 +521,54 @@ impl MangaClient {
         }
     }
 
+    pub async fn get_scanlation_group(&self, id: String) -> Result<ScanlationGroup> {
+        let mut resp: Value = self
+            .query(
+                &format!("{}/group/{id}", MangaClient::BASE_URL),
+                &EmptyQuery {},
+            )
+            .await?
+            .json()
+            .await?;
+
+        let result = match resp.get("result") {
+            Some(status) => status,
+            None => return Err(Error::ParseError),
+        };
+
+        let responded_without_errors;
+
+        if result.is_string() {
+            let result = result.as_str().expect("verified to be a string");
+
+            if result == "ok" {
+                responded_without_errors = true;
+            } else {
+                responded_without_errors = false;
+            }
+        } else {
+            return Err(Error::ParseError);
+        }
+
+        if responded_without_errors {
+            let data = match resp.get_mut("data") {
+                Some(d) => d,
+                None => return Err(Error::ParseError),
+            };
+
+            Ok(serde_json::from_value::<ScanlationGroup>(data.take())?)
+        } else {
+            let errors = match resp.get_mut("errors") {
+                Some(d) => d,
+                None => return Err(Error::ParseError),
+            };
+
+            let err: Vec<BadResponseError> = serde_json::from_value(errors.take())?;
+
+            Err(Error::BadResponseError(err))
+        }
+    }
+
     pub async fn download_page(&self, url: &str) -> Result<Bytes> {
         match self.query(url, &EmptyQuery {}).await?.bytes().await {
             Ok(res) => Ok(res),
@@ -533,13 +585,13 @@ mod tests {
     use std::io::prelude::*;
 
     #[tokio::test]
-    async fn test_find_by_name() {
+    async fn test_search_manga() {
         let client = MangaClient::new().unwrap();
         let resp = client
             .search_manga(&MangaQuery {
-                // title: Some("Chainsaw man".to_string()),
-                status: Some(vec![MangaStatus::Ongoing]),
-                year: Some(2015),
+                title: Some("Chainsaw man".to_string()),
+                // status: Some(vec![MangaStatus::Ongoing]),
+                // year: Some(2015),
                 // original_language: Some(vec![Locale::En]),
                 ..Default::default()
             })
@@ -644,5 +696,61 @@ mod tests {
 
             out_page.write(&bytes).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_scanlation_group() {
+        let client = MangaClient::new().unwrap();
+
+        let chainsaw_manga_id = client
+            .search_manga(&MangaQuery {
+                title: Some("Chainsaw Man".to_string()),
+                available_translated_language: Some(vec![Locale::En]),
+                ..Default::default()
+            })
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
+            ..Default::default()
+        };
+
+        let chapters = client
+            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .await
+            .unwrap();
+
+        let chapter_relatioships = chapters[2].relationships.clone();
+
+        let mut scanlation_group_id = None;
+        for relationship in chapter_relatioships {
+            match relationship.entity_type {
+                EntityType::ScanlationGroup => {
+                    scanlation_group_id = Some(relationship.id);
+
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let scanlation_group_id = scanlation_group_id.unwrap();
+
+        let scanlation_group = client
+            .get_scanlation_group(scanlation_group_id)
+            .await
+            .unwrap();
+
+        let scanlation_group_name = scanlation_group.attributes.name;
+
+        println!("Scanlation group name: {scanlation_group_name}");
     }
 }
