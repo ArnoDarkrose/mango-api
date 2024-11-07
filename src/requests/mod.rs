@@ -360,15 +360,15 @@ impl ResultOk for Value {
     }
 }
 
-pub struct MangaClient {
+pub struct MangoClient {
     client: Client,
 }
 
-impl MangaClient {
+impl MangoClient {
     pub const BASE_URL: &str = "https://api.mangadex.org";
 
-    pub fn new() -> Result<MangaClient> {
-        Ok(MangaClient {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
             client: Client::builder().user_agent("Mango/1.0").build()?,
         })
     }
@@ -413,12 +413,12 @@ impl MangaClient {
 
     pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
         let resp: Value = self
-            .query(&format!("{}/manga", MangaClient::BASE_URL), data)
+            .query(&format!("{}/manga", MangoClient::BASE_URL), data)
             .await?
             .json()
             .await?;
 
-        MangaClient::parse_respond_data(resp).await
+        MangoClient::parse_respond_data(resp).await
     }
 
     pub async fn search_manga_by_name(&self, name: &str) -> Result<Vec<Manga>> {
@@ -431,18 +431,18 @@ impl MangaClient {
 
     pub async fn get_manga_feed(&self, id: String, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
         let resp: Value = self
-            .query(&format!("{}/manga/{id}/feed", MangaClient::BASE_URL), data)
+            .query(&format!("{}/manga/{id}/feed", MangoClient::BASE_URL), data)
             .await?
             .json()
             .await?;
 
-        MangaClient::parse_respond_data(resp).await
+        MangoClient::parse_respond_data(resp).await
     }
 
     pub async fn get_chapter_download_meta(&self, id: String) -> Result<ChapterDownloadMeta> {
         let mut resp: Value = self
             .query(
-                &format!("{}/at-home/server/{id}", MangaClient::BASE_URL),
+                &format!("{}/at-home/server/{id}", MangoClient::BASE_URL),
                 &EmptyQuery {},
             )
             .await?
@@ -465,14 +465,14 @@ impl MangaClient {
     pub async fn get_scanlation_group(&self, id: String) -> Result<ScanlationGroup> {
         let resp: Value = self
             .query(
-                &format!("{}/group/{id}", MangaClient::BASE_URL),
+                &format!("{}/group/{id}", MangoClient::BASE_URL),
                 &EmptyQuery {},
             )
             .await?
             .json()
             .await?;
 
-        MangaClient::parse_respond_data(resp).await
+        MangoClient::parse_respond_data(resp).await
     }
 
     pub async fn download_page(&self, url: &str) -> Result<Bytes> {
@@ -492,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_search_manga() {
-        let client = MangaClient::new().unwrap();
+        let client = MangoClient::new().unwrap();
         let resp = client
             .search_manga(&MangaQuery {
                 title: Some("Chainsaw man".to_string()),
@@ -511,7 +511,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_manga_feed() {
-        let client = MangaClient::new().unwrap();
+        let client = MangoClient::new().unwrap();
 
         let chainsaw_manga_id = client
             .search_manga(&MangaQuery {
@@ -546,7 +546,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_chapter_download() {
-        let client = MangaClient::new().unwrap();
+        let client = MangoClient::new().unwrap();
 
         let chainsaw_manga_id = client
             .search_manga(&MangaQuery {
@@ -606,7 +606,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_scanlation_group() {
-        let client = MangaClient::new().unwrap();
+        let client = MangoClient::new().unwrap();
 
         let chainsaw_manga_id = client
             .search_manga(&MangaQuery {
@@ -658,5 +658,46 @@ mod tests {
         let scanlation_group_name = scanlation_group.attributes.name;
 
         println!("Scanlation group name: {scanlation_group_name}");
+    }
+
+    #[tokio::test]
+    async fn test_pageness() {
+        let client = MangoClient::new().unwrap();
+
+        let chainsaw_manga_id = client
+            .search_manga(&MangaQuery {
+                title: Some("Chainsaw Man".to_string()),
+                available_translated_language: Some(vec![Locale::En]),
+                ..Default::default()
+            })
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
+            limit: Some(200),
+            offset: Some(1),
+            excluded_groups: Some(vec![
+                "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb".to_string(),
+                "a38fc704-90ab-452f-9336-59d84997a9ce".to_string(),
+            ]),
+            ..Default::default()
+        };
+
+        let chapters = client
+            .get_manga_feed(chainsaw_manga_id, &query_data)
+            .await
+            .unwrap();
+
+        let mut out = std::fs::File::create("test_pages").unwrap();
+
+        out.write(format!("{chapters:#?}").as_bytes()).unwrap();
     }
 }
