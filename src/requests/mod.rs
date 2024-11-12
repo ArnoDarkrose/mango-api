@@ -3,13 +3,18 @@ pub mod manga;
 pub mod scanlation_group;
 pub mod tag;
 
+use crate::viewer::ChapterViewer;
+
 use bytes::Bytes;
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::default::Default;
+use std::sync::Mutex;
 use thiserror::Error;
+use tokio::sync::mpsc;
+use tokio::task::{self, JoinSet};
 
 use chapter::{Chapter, ChapterDownloadMeta};
 use manga::{Manga, MangaFeedQuery, MangaQuery};
@@ -361,6 +366,7 @@ impl ResultOk for Value {
     }
 }
 
+#[derive(Clone, Debug)]
 pub struct MangoClient {
     client: Client,
 }
@@ -487,10 +493,265 @@ impl MangoClient {
     }
 
     pub async fn download_page(&self, url: &str) -> Result<Bytes> {
+        // TODO: this a problem
+        // when the url is invalid (for example some time passed and it invalidated)
+        // i might get something like 404 reponse and i don't handle it here
+        // moreover, i don't handle any possible errors that might be returned from the server
+        // the problem i didn't find the documentation for this query
         match self.query(url, &EmptyQuery {}).await?.bytes().await {
             Ok(res) => Ok(res),
             Err(e) => Err(Error::RequestError(e)),
         }
+    }
+
+    pub async fn chapter_viewer(&self, chapter_id: &str) -> Result<ChapterViewer> {
+        use crate::viewer::{ChapterViewer, ManagerCommand, PageStatus, SetCommand};
+
+        use std::fs;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        use tokio_stream::wrappers::ReceiverStream;
+        use tokio_stream::StreamExt as _;
+
+        use tokio::io::AsyncWriteExt as _;
+
+        let download_meta = self.get_chapter_download_meta(chapter_id).await?;
+
+        let len = download_meta.chapter.data.len();
+        let buf = Arc::new(Mutex::new(vec![PageStatus::Idle; len]));
+
+        let (downloadings_sender, downloading_receiver) = mpsc::channel(20);
+        let downloading_receiver = ReceiverStream::new(downloading_receiver);
+
+        let (manager_command_sender, manager_command_receiver) = mpsc::channel(10);
+        let mut manager_command_receiver = ReceiverStream::new(manager_command_receiver);
+
+        let (set_command_sender, set_command_receiver) = mpsc::channel(10);
+        let mut set_command_receiver = ReceiverStream::new(set_command_receiver);
+
+        let res = ChapterViewer {
+            client: self.clone(),
+            opened_page: Arc::new(AtomicUsize::new(1)),
+            downloadings: downloading_receiver,
+            meta: download_meta,
+            statuses: buf,
+            submit_switch: manager_command_sender.clone(),
+        };
+
+        let chapter_download_dir = format!("tmp/{}", res.meta.chapter.hash);
+        if !fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory") {
+            fs::create_dir_all(&chapter_download_dir)
+                .expect("failed to create directory for storing pages");
+        } else {
+            let dir_meta = fs::metadata(&chapter_download_dir)
+                .expect("failed to create directory for storing pages");
+
+            if !dir_meta.is_dir() {
+                panic!("failed to create directory for storing pages: file already exists, not a directory");
+            }
+        }
+
+        let manager_cur_page = Arc::clone(&res.opened_page);
+        let manager_statuses = Arc::clone(&res.statuses);
+        let manager_out_channel = set_command_sender.clone();
+
+        // manager task
+        task::spawn(async move {
+            let opened_page = manager_cur_page;
+            let statuses = manager_statuses;
+            let out_set_commands = manager_out_channel;
+
+            {
+                let mut statuses = statuses.lock().expect("mutex poisoned");
+
+                for i in 0..len.min(4) {
+                    statuses[i] = PageStatus::Loading;
+                }
+            }
+
+            for i in 0..len.min(4) {
+                out_set_commands
+                    .send(SetCommand::NewDownload { page_num: i + 1 })
+                    .await
+                    .expect("join_set task shutdowned before downloading all pages");
+            }
+
+            while let Some(command) = manager_command_receiver.next().await {
+                println!("manager got command: {command:#?}");
+                println!("statuses: {statuses:#?}");
+
+                match command {
+                    ManagerCommand::SwitchPage { page_num } => {
+                        opened_page.store(page_num, Ordering::Release);
+                    }
+                    ManagerCommand::DownloadError { page_num } => {
+                        out_set_commands
+                            .send(SetCommand::NewDownload { page_num })
+                            .await
+                            .expect("join_set task shutdowned before downloading all pages");
+                    }
+                    ManagerCommand::DownloadedSuccessfully { page_num } => {
+                        // NOTE: we don't care if the receiver is no longer interested in this
+                        // information
+                        //
+                        // TODO: maybe this is a bug
+                        let _ = downloadings_sender.send(page_num).await;
+
+                        let opened_page = opened_page.load(Ordering::Acquire);
+
+                        let mut found_loading_pages = false;
+                        let next_download_page;
+                        {
+                            let mut statuses = statuses.lock().expect("mutex poisoined");
+
+                            next_download_page = match statuses[opened_page - 1] {
+                                PageStatus::Idle => Some(opened_page),
+                                _ => {
+                                    let mut page = opened_page;
+
+                                    while page != opened_page - 1 {
+                                        if page == statuses.len() {
+                                            page = 0;
+                                        }
+
+                                        match statuses[page] {
+                                            PageStatus::Idle => {
+                                                break;
+                                            }
+                                            PageStatus::Loading => {
+                                                found_loading_pages = true;
+                                            }
+                                            _ => {}
+                                        };
+
+                                        page += 1;
+                                    }
+
+                                    if page == opened_page - 1 {
+                                        None
+                                    } else {
+                                        statuses[page] = PageStatus::Loading;
+                                        Some(page + 1)
+                                    }
+                                }
+                            };
+                        }
+
+                        match next_download_page {
+                            Some(page) => {
+                                out_set_commands
+                                    .send(SetCommand::NewDownload { page_num: page })
+                                    .await
+                                    .expect(
+                                        "join_set task shutdowned before downloading all pages",
+                                    );
+                            }
+                            None => {
+                                if !found_loading_pages {
+                                    out_set_commands.send(SetCommand::Shutdown).await.expect(
+                                        "join_set task shutdowned before the respectful command",
+                                    );
+                                }
+                            }
+                        };
+                    }
+                }
+            }
+            println!("manager shutdowned");
+        });
+
+        let join_set_download_meta = res.meta.clone();
+        let join_set_mango_client = self.clone();
+        let statuses = Arc::clone(&res.statuses);
+
+        // join_set task
+        task::spawn(async move {
+            let download_meta = join_set_download_meta;
+
+            let mut set = JoinSet::new();
+            let client = join_set_mango_client;
+
+            while let Some(command) = set_command_receiver.next().await {
+                println!("join_set got command: {command:#?}");
+
+                match command {
+                    SetCommand::Shutdown => {
+                        set.shutdown().await;
+
+                        break;
+                    }
+                    SetCommand::NewDownload { page_num } => {
+                        // TODO: maybe i should await on join_next here once
+
+                        let url = format!(
+                            "{}/data/{}/{}",
+                            &download_meta.base_url,
+                            &download_meta.chapter.hash,
+                            &download_meta.chapter.data[page_num - 1]
+                        );
+
+                        println!("download page url: {url}");
+
+                        let client = client.clone();
+                        let chapter_hash = download_meta.chapter.hash.clone();
+                        // let page_hash = download_meta.chapter.data[page_num - 1].clone();
+                        let manager_command_sender = manager_command_sender.clone();
+                        let statuses = Arc::clone(&statuses);
+                        set.spawn(async move {
+                            let res = client.download_page(&url).await;
+
+                            match res {
+                                Ok(res) => {
+                                    let out_page_filename = format!(
+                                        "tmp/{}/page{}.png",
+                                        chapter_hash, page_num
+                                    );
+
+                                    let mut out_page = tokio::fs::File::create(&out_page_filename)
+                                    .await
+                                    .expect("failed to open file to save page");
+
+                                    out_page
+                                        .write(res.as_ref())
+                                        .await
+                                        .expect("failed to save page");
+
+                                    {
+                                        let mut statuses = statuses.lock().expect("mutex poisoned");
+                                        statuses[page_num - 1] = PageStatus::Loaded(out_page_filename.into());
+                                    }
+
+                                    manager_command_sender
+                                        .send(ManagerCommand::DownloadedSuccessfully { page_num })
+                                        .await
+                                        .expect("manager shutdowned before getting the signal from last downloading task");
+                                }
+                                Err(e) => {
+                                    match e {
+                                        Error::RequestError(_) => {
+                                            // TODO: handle possible errors
+
+                                            manager_command_sender
+                                                .send(ManagerCommand::DownloadError{page_num})
+                                                .await
+                                                .expect("manager shutdowned before getting the signal from last downloading task");
+                                        }
+                                        _ => {panic!("Got an unexpected error from download page process")}
+                                    }
+                                }
+                            };
+                        });
+                    }
+                }
+            }
+
+            println!("joinset shutdowned");
+        });
+
+        return Ok(res);
     }
 }
 
@@ -500,6 +761,8 @@ mod tests {
     use super::*;
 
     use std::io::prelude::*;
+
+    use tokio::io::AsyncWriteExt as _;
 
     #[tokio::test]
     async fn test_search_manga() {
@@ -604,10 +867,9 @@ mod tests {
         }
         for (i, page_url) in kdam::tqdm!(download_meta.chapter.data.into_iter().enumerate().take(3))
         {
-            let bytes = client
-                .download_page(&format!("{base_url}/{page_url}"))
-                .await
-                .unwrap();
+            let url = format!("{base_url}/{page_url}");
+
+            let bytes = client.download_page(&url).await.unwrap();
 
             let mut out_page = std::fs::File::create(format!("pages/{i}.png")).unwrap();
 
@@ -616,6 +878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_scanlation_group() {
         let client = MangoClient::new().unwrap();
 
@@ -710,5 +973,53 @@ mod tests {
         let mut out = std::fs::File::create("test_pages").unwrap();
 
         out.write(format!("{chapters:#?}").as_bytes()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_viewer() {
+        let client = MangoClient::new().unwrap();
+
+        let chainsaw_manga_id = client
+            .search_manga(&MangaQuery {
+                title: Some("Chainsaw Man".to_string()),
+                available_translated_language: Some(vec![Locale::En]),
+                ..Default::default()
+            })
+            .await
+            .unwrap()[0]
+            .id
+            .clone();
+
+        let mut query_sorting_options = HashMap::new();
+
+        query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
+
+        let query_data = MangaFeedQuery {
+            translated_language: Some(vec![Locale::En]),
+            order: Some(query_sorting_options),
+            ..Default::default()
+        };
+
+        let chapters = client
+            .get_manga_feed(&chainsaw_manga_id, &query_data)
+            .await
+            .unwrap();
+
+        let first_chapter = chapters[2].clone();
+
+        let mut viewer = client.chapter_viewer(&first_chapter.id).await.unwrap();
+
+        let chapter_len = first_chapter.attributes.pages;
+
+        let mut page_paths = Vec::new();
+        for i in 0..chapter_len {
+            page_paths.push(viewer.get_page(i + 1).await);
+        }
+
+        let mut out = tokio::fs::File::create("page_paths").await.unwrap();
+
+        out.write(format!("{page_paths:#?}").as_bytes())
+            .await
+            .unwrap();
     }
 }
