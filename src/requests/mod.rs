@@ -1,4 +1,6 @@
 // TODO: add download and store full chapter function
+// TODO: make a proper work on errors, sticking everything into one big error is bad
+// TODO: change all span::in_scope to calling .instrument on every future
 
 pub mod chapter;
 pub mod manga;
@@ -16,7 +18,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use reqwest::{Client, Response};
-use reqwest_middleware::ClientBuilder;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
 
 use tokio::io::AsyncWriteExt as _;
@@ -339,6 +341,8 @@ pub enum Error {
     #[error(transparent)]
     RequestError(#[from] reqwest::Error),
     #[error(transparent)]
+    RequestWithMiddleWareError(#[from] reqwest_middleware::Error),
+    #[error(transparent)]
     JsonError(#[from] serde_json::Error),
     #[error("error while parsing json value")]
     ParseError,
@@ -377,7 +381,7 @@ impl ResultOk for Value {
 
 #[derive(Clone, Debug)]
 pub struct MangoClient {
-    client: Client,
+    client: ClientWithMiddleware,
 }
 
 impl MangoClient {
@@ -385,9 +389,9 @@ impl MangoClient {
 
     pub fn new() -> Result<Self> {
         let res = Client::builder().user_agent("Mango/1.0").build()?;
-        // let res = ClientBuilder::new(res)
-        //     .with(TracingMiddleware::default())
-        //     .build();
+        let res = ClientBuilder::new(res)
+            .with(TracingMiddleware::default())
+            .build();
 
         Ok(Self { client: res })
     }
@@ -401,7 +405,7 @@ impl MangoClient {
         let url = format!("{base_url}?{query_data}");
         match self.client.get(url).send().await {
             Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
+            Err(e) => Err(Error::RequestWithMiddleWareError(e)),
         }
     }
 
@@ -1019,14 +1023,14 @@ mod tests {
         }
 
         let filter = EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
+            .with_default_directive(LevelFilter::DEBUG.into())
             .from_env_lossy();
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_test_writer()
-                    // .with_writer(|| std::fs::File::options().append(true).open("logs").unwrap())
+                    .with_writer(|| std::fs::File::options().append(true).open("logs").unwrap())
                     .pretty()
                     .compact(),
             )
