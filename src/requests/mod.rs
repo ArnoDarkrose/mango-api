@@ -24,8 +24,10 @@ use reqwest_tracing::TracingMiddleware;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc;
 use tokio::task::{self, JoinSet};
+
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+
 use tracing::instrument::Instrument;
 use tracing::{debug_span, Span};
 
@@ -545,213 +547,169 @@ impl MangoClient {
         Ok(resp)
     }
 
-    #[tracing::instrument(skip(self))]
-    pub async fn chapter_viewer(
-        &self,
-        chapter_id: &str,
-        mut max_concurrent_downloads: usize,
-    ) -> Result<ChapterViewer> {
-        max_concurrent_downloads = max_concurrent_downloads.max(1);
-
-        let download_meta = self.get_chapter_download_meta(chapter_id).await?;
-
-        let len = download_meta.chapter.data.len();
-        let buf = Arc::new(Mutex::new(vec![PageStatus::Idle; len]));
-
-        let (downloadings_sender, downloading_receiver) = mpsc::channel(len);
-        let downloading_receiver = ReceiverStream::new(downloading_receiver);
-
-        let (manager_command_sender, manager_command_receiver) = mpsc::channel(10);
-        let mut manager_command_receiver = ReceiverStream::new(manager_command_receiver);
-
-        let (set_command_sender, set_command_receiver) = mpsc::channel(10);
-        let mut set_command_receiver = ReceiverStream::new(set_command_receiver);
-
-        let res = ChapterViewer {
-            opened_page: Arc::new(AtomicUsize::new(1)),
-            downloadings: downloading_receiver,
-            meta: download_meta,
-            statuses: buf,
-            submit_switch: manager_command_sender.clone(),
-        };
-
-        let chapter_download_dir = format!("tmp/{}", res.meta.chapter.hash);
-        if !std::fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory")
+    #[tracing::instrument(skip(
+        statuses,
+        set_command_sender,
+        downloadings_sender,
+        command_receiver
+    ))]
+    async fn downloadings_manager(
+        opened_page: Arc<AtomicUsize>,
+        statuses: Arc<Mutex<Vec<PageStatus>>>,
+        set_command_sender: mpsc::Sender<SetCommand>,
+        downloadings_sender: mpsc::Sender<usize>,
+        mut command_receiver: ReceiverStream<ManagerCommand>,
+        max_concurrent_downloads: usize,
+        chapter_size: usize,
+    ) {
         {
-            std::fs::create_dir_all(&chapter_download_dir)
-                .expect("failed to create directory for storing pages");
-        } else {
-            let dir_meta = std::fs::metadata(&chapter_download_dir)
-                .expect("failed to create directory for storing pages");
+            let mut statuses = statuses.lock().expect("mutex poisoned");
 
-            if !dir_meta.is_dir() {
-                panic!("failed to create directory for storing pages: file already exists, not a directory");
+            for i in 0..chapter_size.min(max_concurrent_downloads) {
+                statuses[i] = PageStatus::Loading(0);
             }
         }
 
-        let manager_cur_page = Arc::clone(&res.opened_page);
-        let manager_statuses = Arc::clone(&res.statuses);
-        let manager_out_channel = set_command_sender.clone();
+        for i in 0..chapter_size.min(max_concurrent_downloads) {
+            set_command_sender
+                .send(SetCommand::NewDownload { page_num: i + 1 })
+                .await
+                .expect("join_set task shutdowned before downloading all pages");
+        }
 
-        // NOTE: downloadings manager task
-        task::spawn(
-            async move {
-                let opened_page = manager_cur_page;
-                let statuses = manager_statuses;
-                let out_set_commands = manager_out_channel;
+        while let Some(command) = command_receiver.next().await {
+            tracing::debug!("got command: \n{command:#?}\n");
+            tracing::trace!("\nstatuses: {statuses:#?}\n");
 
-                {
-                    let mut statuses = statuses.lock().expect("mutex poisoned");
-
-                    for i in 0..len.min(max_concurrent_downloads) {
-                        statuses[i] = PageStatus::Loading(0);
-                    }
+            match command {
+                ManagerCommand::SwitchPage { page_num } => {
+                    opened_page.store(page_num, Ordering::Release);
                 }
-
-                for i in 0..len.min(max_concurrent_downloads) {
-                    out_set_commands
-                        .send(SetCommand::NewDownload { page_num: i + 1 })
+                ManagerCommand::DownloadError { page_num } => {
+                    let new_download_command = SetCommand::NewDownload { page_num };
+                    set_command_sender
+                        .send(new_download_command)
                         .await
                         .expect("join_set task shutdowned before downloading all pages");
+
+                    tracing::trace!("manager sent {new_download_command:#?} command to set");
                 }
+                ManagerCommand::DownloadedSuccessfully { page_num } => {
+                    // NOTE: we don't care if the receiver is no longer interested in this
+                    // information
+                    //
+                    // TODO: maybe this is a bug
+                    let _ = downloadings_sender.send(page_num).await;
 
-                while let Some(command) = manager_command_receiver.next().await {
-                    tracing::debug!("got command: \n{command:#?}\n");
-                    tracing::trace!("\nstatuses: {statuses:#?}\n");
+                    let opened_page = opened_page.load(Ordering::Acquire);
 
-                    match command {
-                        ManagerCommand::SwitchPage { page_num } => {
-                            opened_page.store(page_num, Ordering::Release);
-                        }
-                        ManagerCommand::DownloadError { page_num } => {
-                            let new_download_command = SetCommand::NewDownload { page_num };
-                            out_set_commands
-                                .send(new_download_command)
+                    let mut found_loading_pages = false;
+                    let next_download_page;
+                    {
+                        let mut statuses = statuses.lock().expect("mutex poisoined");
+
+                        next_download_page = match statuses[opened_page - 1] {
+                            PageStatus::Idle => Some(opened_page),
+                            _ => {
+                                let mut page = opened_page;
+
+                                while page != opened_page - 1 {
+                                    if page == statuses.len() {
+                                        page = 0;
+                                    }
+
+                                    match statuses[page] {
+                                        PageStatus::Idle => {
+                                            break;
+                                        }
+                                        PageStatus::Loading(_) => {
+                                            found_loading_pages = true;
+                                        }
+                                        _ => {}
+                                    };
+
+                                    page += 1;
+                                }
+
+                                if page == opened_page - 1 {
+                                    if let PageStatus::Loading(_) = statuses[page] {
+                                        found_loading_pages = true;
+                                    }
+
+                                    None
+                                } else {
+                                    statuses[page] = PageStatus::Loading(0);
+                                    Some(page + 1)
+                                }
+                            }
+                        };
+                    }
+
+                    match next_download_page {
+                        Some(page) => {
+                            let command = SetCommand::NewDownload { page_num: page };
+                            set_command_sender
+                                .send(command)
                                 .await
                                 .expect("join_set task shutdowned before downloading all pages");
 
-                            tracing::trace!(
-                                "manager sent {new_download_command:#?} command to set"
-                            );
+                            tracing::trace!("manager sent {command:#?} command to set");
                         }
-                        ManagerCommand::DownloadedSuccessfully { page_num } => {
-                            // NOTE: we don't care if the receiver is no longer interested in this
-                            // information
-                            //
-                            // TODO: maybe this is a bug
-                            let _ = downloadings_sender.send(page_num).await;
+                        None => {
+                            if !found_loading_pages {
+                                set_command_sender.send(SetCommand::Shutdown).await.expect(
+                                    "join_set task shutdowned before the respectful command",
+                                );
 
-                            let opened_page = opened_page.load(Ordering::Acquire);
+                                tracing::trace!("manager sent shutdown command to set");
 
-                            let mut found_loading_pages = false;
-                            let next_download_page;
-                            {
-                                let mut statuses = statuses.lock().expect("mutex poisoined");
-
-                                next_download_page = match statuses[opened_page - 1] {
-                                    PageStatus::Idle => Some(opened_page),
-                                    _ => {
-                                        let mut page = opened_page;
-
-                                        while page != opened_page - 1 {
-                                            if page == statuses.len() {
-                                                page = 0;
-                                            }
-
-                                            match statuses[page] {
-                                                PageStatus::Idle => {
-                                                    break;
-                                                }
-                                                PageStatus::Loading(_) => {
-                                                    found_loading_pages = true;
-                                                }
-                                                _ => {}
-                                            };
-
-                                            page += 1;
-                                        }
-
-                                        if page == opened_page - 1 {
-                                            if let PageStatus::Loading(_) = statuses[page] {
-                                                found_loading_pages = true;
-                                            }
-
-                                            None
-                                        } else {
-                                            statuses[page] = PageStatus::Loading(0);
-                                            Some(page + 1)
-                                        }
-                                    }
-                                };
+                                break;
                             }
-
-                            match next_download_page {
-                                Some(page) => {
-                                    let command = SetCommand::NewDownload { page_num: page };
-                                    out_set_commands.send(command).await.expect(
-                                        "join_set task shutdowned before downloading all pages",
-                                    );
-
-                                    tracing::trace!("manager sent {command:#?} command to set");
-                                }
-                                None => {
-                                    if !found_loading_pages {
-                                        out_set_commands.send(SetCommand::Shutdown).await.expect(
-                                        "join_set task shutdowned before the respectful command",
-                                    );
-
-                                        tracing::trace!("manager sent shutdown command to set");
-
-                                        break;
-                                    }
-                                }
-                            };
                         }
-                    }
+                    };
                 }
-                tracing::debug!("shutdowned");
             }
-            .instrument(debug_span!(parent: &Span::current(), "manager")),
-        );
+        }
+        tracing::debug!("shutdowned");
+    }
 
-        let join_set_download_meta = res.meta.clone();
-        let join_set_mango_client = self.clone();
-        let statuses = Arc::clone(&res.statuses);
+    #[tracing::instrument(skip(client, meta, command_receiver, statuses, manager_command_sender))]
+    async fn task_spawner(
+        client: MangoClient,
+        meta: ChapterDownloadMeta,
+        mut command_receiver: ReceiverStream<SetCommand>,
+        statuses: Arc<Mutex<Vec<PageStatus>>>,
+        manager_command_sender: mpsc::Sender<ManagerCommand>,
+    ) {
+        let mut set = JoinSet::new();
 
-        // NOTE: join_set task
-        task::spawn(async move {
-            let download_meta = join_set_download_meta;
+        while let Some(command) = command_receiver.next().await {
+            tracing::debug!("got command: \n{command:#?}\n");
 
-            let mut set = JoinSet::new();
-            let client = join_set_mango_client;
+            match command {
+                SetCommand::Shutdown => {
+                    set.shutdown().await;
 
-            while let Some(command) = set_command_receiver.next().await {
-                tracing::debug!("got command: \n{command:#?}\n");
+                    break;
+                }
+                SetCommand::NewDownload { page_num } => {
+                    // NOTE: we don't care about the result of the computations, this is simply
+                    // for the sake of buffer not overflowing
+                    let _ = set.try_join_next();
 
-                match command {
-                    SetCommand::Shutdown => {
-                        set.shutdown().await;
+                    let url = format!(
+                        "{}/data/{}/{}",
+                        &meta.base_url,
+                        &meta.chapter.hash,
+                        &meta.chapter.data[page_num - 1]
+                    );
 
-                        break;
-                    }
-                    SetCommand::NewDownload { page_num } => {
-                        // NOTE: we don't care about the result of the computations, this is simply
-                        // for the sake of buffer not overflowing
-                        let _ = set.try_join_next();
+                    let client = client.clone();
+                    let chapter_hash = meta.chapter.hash.clone();
+                    let manager_command_sender = manager_command_sender.clone();
+                    let statuses = Arc::clone(&statuses);
 
-                        let url = format!(
-                            "{}/data/{}/{}",
-                            &download_meta.base_url,
-                            &download_meta.chapter.hash,
-                            &download_meta.chapter.data[page_num - 1]
-                        );
-
-                        let client = client.clone();
-                        let chapter_hash = download_meta.chapter.hash.clone();
-                        let manager_command_sender = manager_command_sender.clone();
-                        let statuses = Arc::clone(&statuses);
-
-                        set.spawn(async move {
+                    set.spawn(async move {
                             let out_page_filename = format!(
                                 "tmp/{}/{}.png",
                                 chapter_hash, page_num
@@ -836,14 +794,89 @@ impl MangoClient {
                             }
                         }.instrument(debug_span!(parent: &Span::current(), "download task", page_num)));
 
-                        tracing::trace!("set spawned new download task");
-                    }
+                    tracing::trace!("set spawned new download task");
                 }
             }
-
-            tracing::debug!("shutdowned");
         }
-        .instrument(debug_span!(parent: &Span::current(), "join_set")));
+
+        tracing::debug!("shutdowned");
+    }
+
+    #[tracing::instrument(skip(self))]
+    pub async fn chapter_viewer(
+        &self,
+        chapter_id: &str,
+        mut max_concurrent_downloads: usize,
+    ) -> Result<ChapterViewer> {
+        max_concurrent_downloads = max_concurrent_downloads.max(1);
+
+        let download_meta = self.get_chapter_download_meta(chapter_id).await?;
+
+        let len = download_meta.chapter.data.len();
+        let buf = Arc::new(Mutex::new(vec![PageStatus::Idle; len]));
+
+        let (downloadings_sender, downloading_receiver) = mpsc::channel(len);
+        let downloading_receiver = ReceiverStream::new(downloading_receiver);
+
+        let (manager_command_sender, manager_command_receiver) = mpsc::channel(10);
+        let manager_command_receiver = ReceiverStream::new(manager_command_receiver);
+
+        let (set_command_sender, set_command_receiver) = mpsc::channel(10);
+        let mut set_command_receiver = ReceiverStream::new(set_command_receiver);
+
+        let res = ChapterViewer {
+            opened_page: Arc::new(AtomicUsize::new(1)),
+            downloadings: downloading_receiver,
+            meta: download_meta,
+            statuses: buf,
+            submit_switch: manager_command_sender.clone(),
+        };
+
+        let chapter_download_dir = format!("tmp/{}", res.meta.chapter.hash);
+        if !std::fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory")
+        {
+            std::fs::create_dir_all(&chapter_download_dir)
+                .expect("failed to create directory for storing pages");
+        } else {
+            let dir_meta = std::fs::metadata(&chapter_download_dir)
+                .expect("failed to create directory for storing pages");
+
+            if !dir_meta.is_dir() {
+                panic!("failed to create directory for storing pages: file already exists, not a directory");
+            }
+        }
+
+        // NOTE: downloadings manager task
+        task::spawn(
+            Self::downloadings_manager(
+                Arc::clone(&res.opened_page),
+                Arc::clone(&res.statuses),
+                set_command_sender.clone(),
+                downloadings_sender,
+                manager_command_receiver,
+                max_concurrent_downloads,
+                len,
+            )
+            .instrument(debug_span!(parent: &Span::current(), "manager")),
+        );
+
+        let join_set_download_meta = res.meta.clone();
+        let join_set_mango_client = self.clone();
+        let statuses = Arc::clone(&res.statuses);
+
+        // NOTE: join_set task
+        task::spawn(
+            async move {
+                Self::task_spawner(
+                    join_set_mango_client,
+                    join_set_download_meta,
+                    set_command_receiver,
+                    statuses,
+                    manager_command_sender,
+                )
+            }
+            .instrument(debug_span!(parent: &Span::current(), "join_set")),
+        );
 
         return Ok(res);
     }
