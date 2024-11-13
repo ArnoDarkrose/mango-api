@@ -8,6 +8,8 @@ use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
+use tracing::{instrument::Instrument, Span};
+
 #[derive(Debug, Clone)]
 pub(crate) enum PageStatus {
     Loaded(PathBuf),
@@ -38,11 +40,18 @@ pub struct ChapterViewer {
 }
 
 impl ChapterViewer {
+    #[tracing::instrument(skip(self))]
     pub async fn get_page(&mut self, page_num: usize) -> PathBuf {
+        tracing::trace!("entered");
+
+        tracing::trace!("acquiring mutex lock");
+
         let status = {
             let statuses = self.statuses.lock().expect("mutex poisoned");
             statuses[page_num - 1].clone()
         };
+
+        tracing::trace!("released mutex lock");
 
         let sender = self.submit_switch.clone();
 
@@ -55,13 +64,21 @@ impl ChapterViewer {
         match status {
             PageStatus::Loaded(path) => path,
             _ => {
+                tracing::trace!("starting waiting for page {page_num}");
+
                 let mut res = None;
                 while let Some(downloaded_page_num) = self.downloadings.next().await {
-                    if downloaded_page_num == page_num {
-                        let statuses = self.statuses.lock().expect("mutex poisoned");
-                        let status = statuses[page_num - 1].clone();
+                    tracing::trace!("got signal that page {downloaded_page_num} loaded");
 
-                        drop(statuses);
+                    if downloaded_page_num == page_num {
+                        tracing::trace!("acquiring mutex lock");
+
+                        let status = {
+                            let statuses = self.statuses.lock().expect("mutex poisoned");
+                            statuses[page_num - 1].clone()
+                        };
+
+                        tracing::trace!("returned mutex lock");
 
                         match status {
                             PageStatus::Loaded(path) => {

@@ -22,4 +22,5 @@ thiserror = "2.0.0"
 tokio = { version = "1.41.0", features = ["fs", "full"] }
 tokio-stream = "0.1.16"
 tracing = "0.1.40"
+tracing-appender = "0.2.3"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }

@@ -27,7 +27,7 @@ use tokio::task::{self, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 use tracing::instrument::Instrument;
-use tracing::Span;
+use tracing::{debug_span, Span};
 
 use std::collections::HashMap;
 use std::default::Default;
@@ -543,7 +543,7 @@ impl MangoClient {
         let len = download_meta.chapter.data.len();
         let buf = Arc::new(Mutex::new(vec![PageStatus::Idle; len]));
 
-        let (downloadings_sender, downloading_receiver) = mpsc::channel(20);
+        let (downloadings_sender, downloading_receiver) = mpsc::channel(len);
         let downloading_receiver = ReceiverStream::new(downloading_receiver);
 
         let (manager_command_sender, manager_command_receiver) = mpsc::channel(10);
@@ -578,125 +578,130 @@ impl MangoClient {
         let manager_statuses = Arc::clone(&res.statuses);
         let manager_out_channel = set_command_sender.clone();
 
-        let manager_span = Span::current();
-
         // NOTE: downloadings manager task
-        task::spawn(async move {
-            let opened_page = manager_cur_page;
-            let statuses = manager_statuses;
-            let out_set_commands = manager_out_channel;
+        task::spawn(
+            async move {
+                let opened_page = manager_cur_page;
+                let statuses = manager_statuses;
+                let out_set_commands = manager_out_channel;
 
-            {
-                let mut statuses = statuses.lock().expect("mutex poisoned");
+                {
+                    let mut statuses = statuses.lock().expect("mutex poisoned");
+
+                    for i in 0..len.min(max_concurrent_downloads) {
+                        statuses[i] = PageStatus::Loading;
+                    }
+                }
 
                 for i in 0..len.min(max_concurrent_downloads) {
-                    statuses[i] = PageStatus::Loading;
+                    out_set_commands
+                        .send(SetCommand::NewDownload { page_num: i + 1 })
+                        .await
+                        .expect("join_set task shutdowned before downloading all pages");
                 }
-            }
 
-            for i in 0..len.min(max_concurrent_downloads) {
-                out_set_commands
-                    .send(SetCommand::NewDownload { page_num: i + 1 })
-                    .await
-                    .expect("join_set task shutdowned before downloading all pages");
-            }
-
-            while let Some(command) = manager_command_receiver.next().await {
-                manager_span.in_scope(|| {
-                    tracing::debug!("\nmanager got command: {command:#?}\n");
+                while let Some(command) = manager_command_receiver.next().await {
+                    tracing::debug!("got command: \n{command:#?}\n");
                     tracing::trace!("\nstatuses: {statuses:#?}\n");
-                });
 
-                match command {
-                    ManagerCommand::SwitchPage { page_num } => {
-                        opened_page.store(page_num, Ordering::Release);
-                    }
-                    ManagerCommand::DownloadError { page_num } => {
-                        out_set_commands
-                            .send(SetCommand::NewDownload { page_num })
-                            .await
-                            .expect("join_set task shutdowned before downloading all pages");
-                    }
-                    ManagerCommand::DownloadedSuccessfully { page_num } => {
-                        // NOTE: we don't care if the receiver is no longer interested in this
-                        // information
-                        //
-                        // TODO: maybe this is a bug
-                        let _ = downloadings_sender.send(page_num).await;
+                    match command {
+                        ManagerCommand::SwitchPage { page_num } => {
+                            opened_page.store(page_num, Ordering::Release);
+                        }
+                        ManagerCommand::DownloadError { page_num } => {
+                            let new_download_command = SetCommand::NewDownload { page_num };
+                            out_set_commands
+                                .send(new_download_command)
+                                .await
+                                .expect("join_set task shutdowned before downloading all pages");
 
-                        let opened_page = opened_page.load(Ordering::Acquire);
+                            tracing::trace!(
+                                "manager sent {new_download_command:#?} command to set"
+                            );
+                        }
+                        ManagerCommand::DownloadedSuccessfully { page_num } => {
+                            // NOTE: we don't care if the receiver is no longer interested in this
+                            // information
+                            //
+                            // TODO: maybe this is a bug
+                            let _ = downloadings_sender.send(page_num).await;
 
-                        let mut found_loading_pages = false;
-                        let next_download_page;
-                        {
-                            let mut statuses = statuses.lock().expect("mutex poisoined");
+                            let opened_page = opened_page.load(Ordering::Acquire);
 
-                            next_download_page = match statuses[opened_page - 1] {
-                                PageStatus::Idle => Some(opened_page),
-                                _ => {
-                                    let mut page = opened_page;
+                            let mut found_loading_pages = false;
+                            let next_download_page;
+                            {
+                                let mut statuses = statuses.lock().expect("mutex poisoined");
 
-                                    while page != opened_page - 1 {
-                                        if page == statuses.len() {
-                                            page = 0;
+                                next_download_page = match statuses[opened_page - 1] {
+                                    PageStatus::Idle => Some(opened_page),
+                                    _ => {
+                                        let mut page = opened_page;
+
+                                        while page != opened_page - 1 {
+                                            if page == statuses.len() {
+                                                page = 0;
+                                            }
+
+                                            match statuses[page] {
+                                                PageStatus::Idle => {
+                                                    break;
+                                                }
+                                                PageStatus::Loading => {
+                                                    found_loading_pages = true;
+                                                }
+                                                _ => {}
+                                            };
+
+                                            page += 1;
                                         }
 
-                                        match statuses[page] {
-                                            PageStatus::Idle => {
-                                                break;
-                                            }
-                                            PageStatus::Loading => {
+                                        if page == opened_page - 1 {
+                                            if let PageStatus::Loading = statuses[page] {
                                                 found_loading_pages = true;
                                             }
-                                            _ => {}
-                                        };
 
-                                        page += 1;
-                                    }
-
-                                    if page == opened_page - 1 {
-                                        if let PageStatus::Loading = statuses[page] {
-                                            found_loading_pages = true;
+                                            None
+                                        } else {
+                                            statuses[page] = PageStatus::Loading;
+                                            Some(page + 1)
                                         }
+                                    }
+                                };
+                            }
 
-                                        None
-                                    } else {
-                                        statuses[page] = PageStatus::Loading;
-                                        Some(page + 1)
+                            match next_download_page {
+                                Some(page) => {
+                                    let command = SetCommand::NewDownload { page_num: page };
+                                    out_set_commands.send(command).await.expect(
+                                        "join_set task shutdowned before downloading all pages",
+                                    );
+
+                                    tracing::trace!("manager sent {command:#?} command to set");
+                                }
+                                None => {
+                                    if !found_loading_pages {
+                                        out_set_commands.send(SetCommand::Shutdown).await.expect(
+                                        "join_set task shutdowned before the respectful command",
+                                    );
+
+                                        tracing::trace!("manager sent shutdown command to set");
+
+                                        break;
                                     }
                                 }
                             };
                         }
-
-                        match next_download_page {
-                            Some(page) => {
-                                out_set_commands
-                                    .send(SetCommand::NewDownload { page_num: page })
-                                    .await
-                                    .expect(
-                                        "join_set task shutdowned before downloading all pages",
-                                    );
-                            }
-                            None => {
-                                if !found_loading_pages {
-                                    out_set_commands.send(SetCommand::Shutdown).await.expect(
-                                        "join_set task shutdowned before the respectful command",
-                                    );
-
-                                    break;
-                                }
-                            }
-                        };
                     }
                 }
+                tracing::debug!("shutdowned");
             }
-            manager_span.in_scope(|| tracing::debug!("\nmanager shutdowned\n"));
-        });
+            .instrument(debug_span!(parent: &Span::current(), "manager")),
+        );
 
         let join_set_download_meta = res.meta.clone();
         let join_set_mango_client = self.clone();
         let statuses = Arc::clone(&res.statuses);
-        let set_span = Span::current();
 
         // NOTE: join_set task
         task::spawn(async move {
@@ -706,7 +711,7 @@ impl MangoClient {
             let client = join_set_mango_client;
 
             while let Some(command) = set_command_receiver.next().await {
-                set_span.in_scope(|| tracing::debug!("\njoin_set got command: {command:#?}\n"));
+                tracing::debug!("got command: \n{command:#?}\n");
 
                 match command {
                     SetCommand::Shutdown => {
@@ -730,10 +735,9 @@ impl MangoClient {
                         let chapter_hash = download_meta.chapter.hash.clone();
                         let manager_command_sender = manager_command_sender.clone();
                         let statuses = Arc::clone(&statuses);
-                        let downloading_task_span = set_span.clone();
 
                         set.spawn(async move {
-                            let res = client.download_page(&url).await;
+                            let res = client.download_page(&url).instrument(Span::current().clone()).await;
 
                             match res {
                                 Ok(res) => {
@@ -766,7 +770,7 @@ impl MangoClient {
                                         Error::RequestError(e) => {
                                             // TODO: handle possible errors
 
-                                            downloading_task_span.in_scope(|| tracing::warn!("got respond from the server: {e:#?}"));
+                                            tracing::warn!("got respond from the server: {e:#?}");
 
                                             manager_command_sender
                                                 .send(ManagerCommand::DownloadError{page_num})
@@ -777,13 +781,16 @@ impl MangoClient {
                                     }
                                 }
                             };
-                        }.instrument(set_span.clone()));
+                        }.instrument(debug_span!(parent: &Span::current(), "download task")));
+
+                        tracing::trace!("set spawned new download task");
                     }
                 }
             }
 
-            set_span.in_scope(|| tracing::debug!("\njoin_set shutdowned\n"));
-        });
+            tracing::debug!("shutdowned");
+        }
+        .instrument(debug_span!(parent: &Span::current(), "join_set")));
 
         return Ok(res);
     }
@@ -794,15 +801,12 @@ mod tests {
     use super::manga::*;
     use super::*;
 
-    use std::io::prelude::*;
-
     use tracing_subscriber::filter::EnvFilter;
     use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::prelude::*;
 
     #[tokio::test]
-    #[ignore]
     async fn test_search_manga() {
         let client = MangoClient::new().unwrap();
         let resp = client
@@ -816,13 +820,14 @@ mod tests {
             .await
             .unwrap();
 
-        let mut out = std::fs::File::create("manga_struct").unwrap();
+        let mut out = tokio::fs::File::create("manga_struct").await.unwrap();
 
-        out.write(format!("{resp:#?}").as_bytes()).unwrap();
+        out.write_all(format!("{resp:#?}").as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_get_manga_feed() {
         let client = MangoClient::new().unwrap();
 
@@ -852,13 +857,14 @@ mod tests {
             .await
             .unwrap();
 
-        let mut out = std::fs::File::create("chapters_struct").unwrap();
+        let mut out = tokio::fs::File::create("chapters_struct").await.unwrap();
 
-        out.write(format!("{chapters:#?}").as_bytes()).unwrap();
+        out.write_all(format!("{chapters:#?}").as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_chapter_download() {
         let client = MangoClient::new().unwrap();
 
@@ -888,13 +894,14 @@ mod tests {
             .await
             .unwrap();
 
-        let mut out = std::fs::File::create("chapters_meta").unwrap();
+        let mut out = tokio::fs::File::create("chapters_meta").await.unwrap();
 
         let id = chapters[2].id.clone();
 
         let download_meta = client.get_chapter_download_meta(&id).await.unwrap();
 
-        out.write(format!("{download_meta:#?}\n").as_bytes())
+        out.write_all(format!("{download_meta:#?}\n").as_bytes())
+            .await
             .unwrap();
 
         let base_url = format!(
@@ -905,20 +912,20 @@ mod tests {
         if !std::fs::exists("pages").unwrap() {
             std::fs::create_dir("pages").unwrap();
         }
-        for (i, page_url) in kdam::tqdm!(download_meta.chapter.data.into_iter().enumerate().take(3))
-        {
+        for (i, page_url) in download_meta.chapter.data.into_iter().enumerate().take(3) {
             let url = format!("{base_url}/{page_url}");
 
             let bytes = client.download_page(&url).await.unwrap();
 
-            let mut out_page = std::fs::File::create(format!("pages/{i}.png")).unwrap();
+            let mut out_page = tokio::fs::File::create(format!("pages/{i}.png"))
+                .await
+                .unwrap();
 
-            out_page.write(&bytes).unwrap();
+            out_page.write_all(&bytes).await.unwrap();
         }
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_get_scanlation_group() {
         let client = MangoClient::new().unwrap();
 
@@ -971,11 +978,15 @@ mod tests {
 
         let scanlation_group_name = scanlation_group.attributes.name;
 
-        println!("Scanlation group name: {scanlation_group_name}");
+        let mut out = tokio::fs::File::create("scanlation_group_name_test")
+            .await
+            .unwrap();
+        out.write_all(format!("Scanlation group name: {scanlation_group_name}").as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
-    #[ignore]
     async fn test_pageness() {
         let client = MangoClient::new().unwrap();
 
@@ -1011,9 +1022,11 @@ mod tests {
             .await
             .unwrap();
 
-        let mut out = std::fs::File::create("test_pages").unwrap();
+        let mut out = tokio::fs::File::create("test_pages").await.unwrap();
 
-        out.write(format!("{chapters:#?}").as_bytes()).unwrap();
+        out.write_all(format!("{chapters:#?}").as_bytes())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1023,14 +1036,18 @@ mod tests {
         }
 
         let filter = EnvFilter::builder()
-            .with_default_directive(LevelFilter::DEBUG.into())
+            .with_default_directive(LevelFilter::TRACE.into())
             .from_env_lossy();
+
+        let (writer, _guard) = tracing_appender::non_blocking(
+            std::fs::File::options().append(true).open("logs").unwrap(),
+        );
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_test_writer()
-                    .with_writer(|| std::fs::File::options().append(true).open("logs").unwrap())
+                    .with_writer(writer)
                     .pretty()
                     .compact(),
             )
@@ -1067,7 +1084,7 @@ mod tests {
 
         let first_chapter = chapters[2].clone();
 
-        let mut viewer = client.chapter_viewer(&first_chapter.id, 10).await.unwrap();
+        let mut viewer = client.chapter_viewer(&first_chapter.id, 8).await.unwrap();
 
         let chapter_len = first_chapter.attributes.pages;
 
