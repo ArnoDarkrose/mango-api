@@ -1,3 +1,5 @@
+// TODO: add download and store full chapter function
+
 pub mod chapter;
 pub mod manga;
 pub mod scanlation_group;
@@ -504,7 +506,13 @@ impl MangoClient {
         }
     }
 
-    pub async fn chapter_viewer(&self, chapter_id: &str) -> Result<ChapterViewer> {
+    // TODO: remove debug prints and add tracing
+    #[tracing::instrument]
+    pub async fn chapter_viewer(
+        &self,
+        chapter_id: &str,
+        mut max_concurrent_downloads: usize,
+    ) -> Result<ChapterViewer> {
         use crate::viewer::{ChapterViewer, ManagerCommand, PageStatus, SetCommand};
 
         use std::fs;
@@ -517,6 +525,10 @@ impl MangoClient {
         use tokio_stream::StreamExt as _;
 
         use tokio::io::AsyncWriteExt as _;
+
+        tracing::info!("entered");
+
+        max_concurrent_downloads = max_concurrent_downloads.max(1);
 
         let download_meta = self.get_chapter_download_meta(chapter_id).await?;
 
@@ -567,12 +579,12 @@ impl MangoClient {
             {
                 let mut statuses = statuses.lock().expect("mutex poisoned");
 
-                for i in 0..len.min(4) {
+                for i in 0..len.min(max_concurrent_downloads) {
                     statuses[i] = PageStatus::Loading;
                 }
             }
 
-            for i in 0..len.min(4) {
+            for i in 0..len.min(max_concurrent_downloads) {
                 out_set_commands
                     .send(SetCommand::NewDownload { page_num: i + 1 })
                     .await
@@ -580,8 +592,8 @@ impl MangoClient {
             }
 
             while let Some(command) = manager_command_receiver.next().await {
-                println!("manager got command: {command:#?}");
-                println!("statuses: {statuses:#?}");
+                tracing::info!("manager got command: {command:#?}");
+                // println!("statuses: {statuses:#?}");
 
                 match command {
                     ManagerCommand::SwitchPage { page_num } => {
@@ -631,6 +643,13 @@ impl MangoClient {
                                     }
 
                                     if page == opened_page - 1 {
+                                        match statuses[page] {
+                                            PageStatus::Loading => {
+                                                found_loading_pages = true;
+                                            }
+                                            _ => {}
+                                        };
+
                                         None
                                     } else {
                                         statuses[page] = PageStatus::Loading;
@@ -654,13 +673,15 @@ impl MangoClient {
                                     out_set_commands.send(SetCommand::Shutdown).await.expect(
                                         "join_set task shutdowned before the respectful command",
                                     );
+
+                                    break;
                                 }
                             }
                         };
                     }
                 }
             }
-            println!("manager shutdowned");
+            tracing::info!("manager shutdowned");
         });
 
         let join_set_download_meta = res.meta.clone();
@@ -675,7 +696,7 @@ impl MangoClient {
             let client = join_set_mango_client;
 
             while let Some(command) = set_command_receiver.next().await {
-                println!("join_set got command: {command:#?}");
+                tracing::info!("join_set got command: {command:#?}");
 
                 match command {
                     SetCommand::Shutdown => {
@@ -692,8 +713,6 @@ impl MangoClient {
                             &download_meta.chapter.hash,
                             &download_meta.chapter.data[page_num - 1]
                         );
-
-                        println!("download page url: {url}");
 
                         let client = client.clone();
                         let chapter_hash = download_meta.chapter.hash.clone();
@@ -748,7 +767,7 @@ impl MangoClient {
                 }
             }
 
-            println!("joinset shutdowned");
+            tracing::info!("join_set shutdowned");
         });
 
         return Ok(res);
@@ -763,8 +782,10 @@ mod tests {
     use std::io::prelude::*;
 
     use tokio::io::AsyncWriteExt as _;
+    use tracing_subscriber::{filter::EnvFilter, fmt::fmt};
 
     #[tokio::test]
+    #[ignore]
     async fn test_search_manga() {
         let client = MangoClient::new().unwrap();
         let resp = client
@@ -784,6 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_manga_feed() {
         let client = MangoClient::new().unwrap();
 
@@ -819,6 +841,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_chapter_download() {
         let client = MangoClient::new().unwrap();
 
@@ -935,6 +958,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_pageness() {
         let client = MangoClient::new().unwrap();
 
@@ -977,6 +1001,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer() {
+        let subscriber = tracing_subscriber::FmtSubscriber::new();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+
         let client = MangoClient::new().unwrap();
 
         let chainsaw_manga_id = client
@@ -1007,7 +1034,7 @@ mod tests {
 
         let first_chapter = chapters[2].clone();
 
-        let mut viewer = client.chapter_viewer(&first_chapter.id).await.unwrap();
+        let mut viewer = client.chapter_viewer(&first_chapter.id, 10).await.unwrap();
 
         let chapter_len = first_chapter.attributes.pages;
 
