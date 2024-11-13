@@ -509,7 +509,7 @@ impl MangoClient {
     }
 
     #[tracing::instrument]
-    pub async fn download_page(&self, url: &str) -> Result<Bytes> {
+    pub async fn download_full_page(&self, url: &str) -> Result<Bytes> {
         // TODO: this a problem
         // when the url is invalid (for example some time passed and it invalidated)
         // i might get something like 404 reponse and i don't handle it here
@@ -522,12 +522,27 @@ impl MangoClient {
             tracing::warn!("got an error from server: {resp:#?}");
         }
 
-        let res = match resp.bytes().await {
+        match resp.bytes().await {
             Ok(res) => Ok(res),
             Err(e) => Err(Error::RequestError(e)),
-        };
+        }
+    }
 
-        res
+    #[tracing::instrument]
+    pub async fn get_page_chunks(&self, url: &str) -> Result<Response> {
+        // TODO: this a problem
+        // when the url is invalid (for example some time passed and it invalidated)
+        // i might get something like 404 reponse and i don't handle it here
+        // moreover, i don't handle any possible errors that might be returned from the server
+        // the problem i didn't find the documentation for this query
+
+        let resp = self.query(url, &EmptyQuery {}).await?;
+        let status = resp.status();
+        if status != 200 {
+            tracing::warn!("got an error from server: {resp:#?}");
+        }
+
+        Ok(resp)
     }
 
     #[tracing::instrument(skip(self))]
@@ -589,7 +604,7 @@ impl MangoClient {
                     let mut statuses = statuses.lock().expect("mutex poisoned");
 
                     for i in 0..len.min(max_concurrent_downloads) {
-                        statuses[i] = PageStatus::Loading;
+                        statuses[i] = PageStatus::Loading(0);
                     }
                 }
 
@@ -647,7 +662,7 @@ impl MangoClient {
                                                 PageStatus::Idle => {
                                                     break;
                                                 }
-                                                PageStatus::Loading => {
+                                                PageStatus::Loading(_) => {
                                                     found_loading_pages = true;
                                                 }
                                                 _ => {}
@@ -657,13 +672,13 @@ impl MangoClient {
                                         }
 
                                         if page == opened_page - 1 {
-                                            if let PageStatus::Loading = statuses[page] {
+                                            if let PageStatus::Loading(_) = statuses[page] {
                                                 found_loading_pages = true;
                                             }
 
                                             None
                                         } else {
-                                            statuses[page] = PageStatus::Loading;
+                                            statuses[page] = PageStatus::Loading(0);
                                             Some(page + 1)
                                         }
                                     }
@@ -737,23 +752,60 @@ impl MangoClient {
                         let statuses = Arc::clone(&statuses);
 
                         set.spawn(async move {
-                            let res = client.download_page(&url).instrument(Span::current().clone()).await;
+                            let out_page_filename = format!(
+                                "tmp/{}/{}.png",
+                                chapter_hash, page_num
+                            );
 
-                            match res {
-                                Ok(res) => {
-                                    let out_page_filename = format!(
-                                        "tmp/{}/{}.png",
-                                        chapter_hash, page_num
-                                    );
+                            let mut out_page = tokio::fs::File::create(&out_page_filename)
+                            .await
+                            .expect("failed to open file to save page");
 
-                                    let mut out_page = tokio::fs::File::create(&out_page_filename)
-                                    .await
-                                    .expect("failed to open file to save page");
+                            let resp_res = client.get_page_chunks(&url).in_current_span().await;
 
-                                    out_page
-                                        .write_all(res.as_ref())
-                                        .await
-                                        .expect("failed to save page");
+                            match resp_res {
+                                Ok(mut resp) => {
+                                    let total_size = resp.content_length().expect("could not get the content_length of page");
+
+                                    loop {
+                                        match resp.chunk().in_current_span().await {
+                                            Ok(chunk) => {
+                                                if let Some(res) = chunk {
+                                                    let cur_size = res.len();
+
+                                                    out_page
+                                                        .write_all(res.as_ref())
+                                                        .await
+                                                        .expect("failed to save page");
+
+                                                    {
+                                                        let mut statuses = statuses.lock().expect("mutex poisoned");
+                                                        let already_loaded = match statuses[page_num - 1] {
+                                                            PageStatus::Loading(percent) => percent,
+                                                            _ => unreachable!()
+                                                        };
+
+                                                        statuses[page_num - 1] = PageStatus::Loading(already_loaded + 100 * cur_size / total_size as usize);
+                                                    }
+                                                } else {
+                                                    break;
+                                                }
+
+                                            },
+                                            Err(e) => {
+                                                // TODO: handle possible errors
+
+                                                tracing::warn!("got respond from the server: {e:#?}");
+
+                                                manager_command_sender
+                                                    .send(ManagerCommand::DownloadError{page_num})
+                                                    .await
+                                                    .expect("manager shutdowned before getting the signal from last downloading task");
+
+                                                return;
+                                            }
+                                        }
+                                    }
 
                                     {
                                         let mut statuses = statuses.lock().expect("mutex poisoned");
@@ -764,7 +816,8 @@ impl MangoClient {
                                         .send(ManagerCommand::DownloadedSuccessfully { page_num })
                                         .await
                                         .expect("manager shutdowned before getting the signal from last downloading task");
-                                }
+                                },
+
                                 Err(e) => {
                                     match e {
                                         Error::RequestError(e) => {
@@ -780,8 +833,8 @@ impl MangoClient {
                                         _ => {panic!("Got an unexpected error from download page process")}
                                     }
                                 }
-                            };
-                        }.instrument(debug_span!(parent: &Span::current(), "download task")));
+                            }
+                        }.instrument(debug_span!(parent: &Span::current(), "download task", page_num)));
 
                         tracing::trace!("set spawned new download task");
                     }
@@ -915,7 +968,7 @@ mod tests {
         for (i, page_url) in download_meta.chapter.data.into_iter().enumerate().take(3) {
             let url = format!("{base_url}/{page_url}");
 
-            let bytes = client.download_page(&url).await.unwrap();
+            let bytes = client.download_full_page(&url).await.unwrap();
 
             let mut out_page = tokio::fs::File::create(format!("pages/{i}.png"))
                 .await

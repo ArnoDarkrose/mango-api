@@ -8,12 +8,10 @@ use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
-use tracing::{instrument::Instrument, Span};
-
 #[derive(Debug, Clone)]
 pub(crate) enum PageStatus {
     Loaded(PathBuf),
-    Loading,
+    Loading(usize),
     Idle,
 }
 
