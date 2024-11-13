@@ -9,4 +9,6 @@ chapters_meta
 test_pages 
 test_iter
 page_paths
+exp.rs
+logs
 

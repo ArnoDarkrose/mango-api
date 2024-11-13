@@ -1,10 +1,9 @@
-use crate::requests::Result;
-use crate::requests::{chapter::ChapterDownloadMeta, MangoClient};
+use crate::requests::chapter::ChapterDownloadMeta;
 
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, Arc, Mutex};
 
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 use tokio::task;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
@@ -29,23 +28,21 @@ pub(crate) enum SetCommand {
     NewDownload { page_num: usize },
 }
 
-// TODO: change Mutex to Arc<Mutex>, remove client
 #[derive(Debug)]
 pub struct ChapterViewer {
     pub(crate) opened_page: Arc<AtomicUsize>,
     pub(crate) statuses: Arc<Mutex<Vec<PageStatus>>>,
     pub(crate) meta: ChapterDownloadMeta,
-    pub(crate) client: MangoClient,
     pub(crate) downloadings: ReceiverStream<usize>,
     pub(crate) submit_switch: Sender<ManagerCommand>,
 }
 
 impl ChapterViewer {
     pub async fn get_page(&mut self, page_num: usize) -> PathBuf {
-        let statuses = self.statuses.lock().expect("mutex poisoned");
-        let status = statuses[page_num - 1].clone();
-
-        drop(statuses);
+        let status = {
+            let statuses = self.statuses.lock().expect("mutex poisoned");
+            statuses[page_num - 1].clone()
+        };
 
         let sender = self.submit_switch.clone();
 
@@ -55,7 +52,7 @@ impl ChapterViewer {
             let _ = sender.send(ManagerCommand::SwitchPage { page_num }).await;
         });
 
-        let res = match status {
+        match status {
             PageStatus::Loaded(path) => path,
             _ => {
                 let mut res = None;
@@ -79,8 +76,6 @@ impl ChapterViewer {
                 }
                 res.expect("mananager task shutdowned before desired page was downloaded")
             }
-        };
-
-        res
+        }
     }
 }

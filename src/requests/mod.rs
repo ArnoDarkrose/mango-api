@@ -5,22 +5,35 @@ pub mod manga;
 pub mod scanlation_group;
 pub mod tag;
 
-use crate::viewer::ChapterViewer;
-
-use bytes::Bytes;
-use reqwest::{Client, Response};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::default::Default;
-use std::sync::Mutex;
-use thiserror::Error;
-use tokio::sync::mpsc;
-use tokio::task::{self, JoinSet};
-
+use crate::viewer::{ChapterViewer, ManagerCommand, PageStatus, SetCommand};
 use chapter::{Chapter, ChapterDownloadMeta};
 use manga::{Manga, MangaFeedQuery, MangaQuery};
 use scanlation_group::ScanlationGroup;
+
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use thiserror::Error;
+
+use reqwest::{Client, Response};
+use reqwest_middleware::ClientBuilder;
+use reqwest_tracing::TracingMiddleware;
+
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::mpsc;
+use tokio::task::{self, JoinSet};
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as _;
+use tracing::instrument::Instrument;
+use tracing::Span;
+
+use std::collections::HashMap;
+use std::default::Default;
+use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
 
 pub trait Entity {}
 impl<T: Entity> Entity for Vec<T> {}
@@ -350,19 +363,13 @@ impl ResultOk for Value {
             None => return Err(Error::ParseError),
         };
 
-        let responded_without_errors;
-
-        if result.is_string() {
+        let responded_without_errors = if result.is_string() {
             let result = result.as_str().expect("verified to be a string");
 
-            if result == "ok" {
-                responded_without_errors = true;
-            } else {
-                responded_without_errors = false;
-            }
+            result == "ok"
         } else {
             return Err(Error::ParseError);
-        }
+        };
 
         Ok(responded_without_errors)
     }
@@ -377,9 +384,12 @@ impl MangoClient {
     pub const BASE_URL: &str = "https://api.mangadex.org";
 
     pub fn new() -> Result<Self> {
-        Ok(Self {
-            client: Client::builder().user_agent("Mango/1.0").build()?,
-        })
+        let res = Client::builder().user_agent("Mango/1.0").build()?;
+        // let res = ClientBuilder::new(res)
+        //     .with(TracingMiddleware::default())
+        //     .build();
+
+        Ok(Self { client: res })
     }
 
     pub async fn query(&self, base_url: &str, query: &impl Query) -> Result<Response> {
@@ -494,40 +504,34 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    #[tracing::instrument]
     pub async fn download_page(&self, url: &str) -> Result<Bytes> {
         // TODO: this a problem
         // when the url is invalid (for example some time passed and it invalidated)
         // i might get something like 404 reponse and i don't handle it here
         // moreover, i don't handle any possible errors that might be returned from the server
         // the problem i didn't find the documentation for this query
-        match self.query(url, &EmptyQuery {}).await?.bytes().await {
+
+        let resp = self.query(url, &EmptyQuery {}).await?;
+        let status = resp.status();
+        if status != 200 {
+            tracing::warn!("got an error from server: {resp:#?}");
+        }
+
+        let res = match resp.bytes().await {
             Ok(res) => Ok(res),
             Err(e) => Err(Error::RequestError(e)),
-        }
+        };
+
+        res
     }
 
-    // TODO: remove debug prints and add tracing
-    #[tracing::instrument]
+    #[tracing::instrument(skip(self))]
     pub async fn chapter_viewer(
         &self,
         chapter_id: &str,
         mut max_concurrent_downloads: usize,
     ) -> Result<ChapterViewer> {
-        use crate::viewer::{ChapterViewer, ManagerCommand, PageStatus, SetCommand};
-
-        use std::fs;
-        use std::sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        };
-
-        use tokio_stream::wrappers::ReceiverStream;
-        use tokio_stream::StreamExt as _;
-
-        use tokio::io::AsyncWriteExt as _;
-
-        tracing::info!("entered");
-
         max_concurrent_downloads = max_concurrent_downloads.max(1);
 
         let download_meta = self.get_chapter_download_meta(chapter_id).await?;
@@ -545,7 +549,6 @@ impl MangoClient {
         let mut set_command_receiver = ReceiverStream::new(set_command_receiver);
 
         let res = ChapterViewer {
-            client: self.clone(),
             opened_page: Arc::new(AtomicUsize::new(1)),
             downloadings: downloading_receiver,
             meta: download_meta,
@@ -554,11 +557,12 @@ impl MangoClient {
         };
 
         let chapter_download_dir = format!("tmp/{}", res.meta.chapter.hash);
-        if !fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory") {
-            fs::create_dir_all(&chapter_download_dir)
+        if !std::fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory")
+        {
+            std::fs::create_dir_all(&chapter_download_dir)
                 .expect("failed to create directory for storing pages");
         } else {
-            let dir_meta = fs::metadata(&chapter_download_dir)
+            let dir_meta = std::fs::metadata(&chapter_download_dir)
                 .expect("failed to create directory for storing pages");
 
             if !dir_meta.is_dir() {
@@ -570,7 +574,9 @@ impl MangoClient {
         let manager_statuses = Arc::clone(&res.statuses);
         let manager_out_channel = set_command_sender.clone();
 
-        // manager task
+        let manager_span = Span::current();
+
+        // NOTE: downloadings manager task
         task::spawn(async move {
             let opened_page = manager_cur_page;
             let statuses = manager_statuses;
@@ -592,8 +598,10 @@ impl MangoClient {
             }
 
             while let Some(command) = manager_command_receiver.next().await {
-                tracing::info!("manager got command: {command:#?}");
-                // println!("statuses: {statuses:#?}");
+                manager_span.in_scope(|| {
+                    tracing::debug!("\nmanager got command: {command:#?}\n");
+                    tracing::trace!("\nstatuses: {statuses:#?}\n");
+                });
 
                 match command {
                     ManagerCommand::SwitchPage { page_num } => {
@@ -643,12 +651,9 @@ impl MangoClient {
                                     }
 
                                     if page == opened_page - 1 {
-                                        match statuses[page] {
-                                            PageStatus::Loading => {
-                                                found_loading_pages = true;
-                                            }
-                                            _ => {}
-                                        };
+                                        if let PageStatus::Loading = statuses[page] {
+                                            found_loading_pages = true;
+                                        }
 
                                         None
                                     } else {
@@ -681,14 +686,15 @@ impl MangoClient {
                     }
                 }
             }
-            tracing::info!("manager shutdowned");
+            manager_span.in_scope(|| tracing::debug!("\nmanager shutdowned\n"));
         });
 
         let join_set_download_meta = res.meta.clone();
         let join_set_mango_client = self.clone();
         let statuses = Arc::clone(&res.statuses);
+        let set_span = Span::current();
 
-        // join_set task
+        // NOTE: join_set task
         task::spawn(async move {
             let download_meta = join_set_download_meta;
 
@@ -696,7 +702,7 @@ impl MangoClient {
             let client = join_set_mango_client;
 
             while let Some(command) = set_command_receiver.next().await {
-                tracing::info!("join_set got command: {command:#?}");
+                set_span.in_scope(|| tracing::debug!("\njoin_set got command: {command:#?}\n"));
 
                 match command {
                     SetCommand::Shutdown => {
@@ -705,7 +711,9 @@ impl MangoClient {
                         break;
                     }
                     SetCommand::NewDownload { page_num } => {
-                        // TODO: maybe i should await on join_next here once
+                        // NOTE: we don't care about the result of the computations, this is simply
+                        // for the sake of buffer not overflowing
+                        let _ = set.try_join_next();
 
                         let url = format!(
                             "{}/data/{}/{}",
@@ -716,16 +724,17 @@ impl MangoClient {
 
                         let client = client.clone();
                         let chapter_hash = download_meta.chapter.hash.clone();
-                        // let page_hash = download_meta.chapter.data[page_num - 1].clone();
                         let manager_command_sender = manager_command_sender.clone();
                         let statuses = Arc::clone(&statuses);
+                        let downloading_task_span = set_span.clone();
+
                         set.spawn(async move {
                             let res = client.download_page(&url).await;
 
                             match res {
                                 Ok(res) => {
                                     let out_page_filename = format!(
-                                        "tmp/{}/page{}.png",
+                                        "tmp/{}/{}.png",
                                         chapter_hash, page_num
                                     );
 
@@ -734,7 +743,7 @@ impl MangoClient {
                                     .expect("failed to open file to save page");
 
                                     out_page
-                                        .write(res.as_ref())
+                                        .write_all(res.as_ref())
                                         .await
                                         .expect("failed to save page");
 
@@ -750,8 +759,10 @@ impl MangoClient {
                                 }
                                 Err(e) => {
                                     match e {
-                                        Error::RequestError(_) => {
+                                        Error::RequestError(e) => {
                                             // TODO: handle possible errors
+
+                                            downloading_task_span.in_scope(|| tracing::warn!("got respond from the server: {e:#?}"));
 
                                             manager_command_sender
                                                 .send(ManagerCommand::DownloadError{page_num})
@@ -762,12 +773,12 @@ impl MangoClient {
                                     }
                                 }
                             };
-                        });
+                        }.instrument(set_span.clone()));
                     }
                 }
             }
 
-            tracing::info!("join_set shutdowned");
+            set_span.in_scope(|| tracing::debug!("\njoin_set shutdowned\n"));
         });
 
         return Ok(res);
@@ -781,8 +792,10 @@ mod tests {
 
     use std::io::prelude::*;
 
-    use tokio::io::AsyncWriteExt as _;
-    use tracing_subscriber::{filter::EnvFilter, fmt::fmt};
+    use tracing_subscriber::filter::EnvFilter;
+    use tracing_subscriber::filter::LevelFilter;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::prelude::*;
 
     #[tokio::test]
     #[ignore]
@@ -1001,8 +1014,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer() {
-        let subscriber = tracing_subscriber::FmtSubscriber::new();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
+        {
+            std::fs::File::create("logs").unwrap();
+        }
+
+        let filter = EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy();
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_test_writer()
+                    // .with_writer(|| std::fs::File::options().append(true).open("logs").unwrap())
+                    .pretty()
+                    .compact(),
+            )
+            .with(filter)
+            .init();
 
         let client = MangoClient::new().unwrap();
 
