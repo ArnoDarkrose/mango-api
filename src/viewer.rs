@@ -23,7 +23,7 @@ pub(crate) enum ManagerCommand {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum SetCommand {
+pub(crate) enum DownloadingsSpawnerCommand {
     Shutdown,
     NewDownload { page_num: usize },
 }
