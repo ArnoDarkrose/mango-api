@@ -31,8 +31,9 @@ use tracing::instrument::Instrument as _;
 
 use std::default::Default;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BadResponseError {
@@ -349,7 +350,7 @@ impl MangoClient {
         }
 
         let manager = task::spawn(Self::downloadings_manager(
-            Arc::new(AtomicUsize::new(1)),
+            1,
             Arc::clone(&buf),
             downloadings_spawner_command_sender.clone(),
             None,
@@ -630,7 +631,7 @@ mod tests {
             .with_default_directive(LevelFilter::INFO.into())
             .from_env_lossy();
 
-        let (writer, _guard) = tracing_appender::non_blocking(
+        let (_writer, _guard) = tracing_appender::non_blocking(
             std::fs::File::options().append(true).open("logs").unwrap(),
         );
 
@@ -638,7 +639,7 @@ mod tests {
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_test_writer()
-                    // .with_writer(writer)
+                    // .with_writer(_writer)
                     .pretty()
                     .compact(),
             )

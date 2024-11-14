@@ -2,10 +2,9 @@ use crate::requests::chapter::ChapterDownloadMeta;
 use crate::requests::{Error, MangoClient, Result};
 
 use std::path::PathBuf;
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
-};
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc::{self, Sender};
@@ -39,9 +38,7 @@ pub(crate) enum DownloadingsSpawnerCommand {
 
 #[derive(Debug)]
 pub struct ChapterViewer {
-    pub(crate) opened_page: Arc<AtomicUsize>,
     pub(crate) statuses: Arc<Mutex<Vec<PageStatus>>>,
-    pub(crate) meta: ChapterDownloadMeta,
     pub(crate) downloadings: ReceiverStream<usize>,
     pub(crate) submit_switch: Sender<ManagerCommand>,
 }
@@ -54,7 +51,7 @@ impl ChapterViewer {
         tracing::trace!("acquiring mutex lock");
 
         let status = {
-            let statuses = self.statuses.lock().expect("mutex poisoned");
+            let statuses = self.statuses.lock();
             statuses[page_num - 1].clone()
         };
 
@@ -81,7 +78,7 @@ impl ChapterViewer {
                         tracing::trace!("acquiring mutex lock");
 
                         let status = {
-                            let statuses = self.statuses.lock().expect("mutex poisoned");
+                            let statuses = self.statuses.lock();
                             statuses[page_num - 1].clone()
                         };
 
@@ -106,7 +103,7 @@ impl ChapterViewer {
 
 impl MangoClient {
     pub(crate) fn determine_next_download_page(
-        statuses: &mut std::sync::MutexGuard<'_, Vec<PageStatus>>,
+        statuses: &mut parking_lot::MutexGuard<'_, Vec<PageStatus>>,
         opened_page: usize,
     ) -> (Option<usize>, bool) {
         let mut found_loading_pages = false;
@@ -159,7 +156,7 @@ impl MangoClient {
         command_receiver
     ))]
     pub(crate) async fn downloadings_manager(
-        opened_page: Arc<AtomicUsize>,
+        mut opened_page: usize,
         statuses: Arc<Mutex<Vec<PageStatus>>>,
         set_command_sender: mpsc::Sender<DownloadingsSpawnerCommand>,
         downloadings_sender: Option<mpsc::Sender<usize>>,
@@ -168,7 +165,7 @@ impl MangoClient {
         chapter_size: usize,
     ) {
         {
-            let mut statuses = statuses.lock().expect("mutex poisoned");
+            let mut statuses = statuses.lock();
 
             for i in 0..chapter_size.min(max_concurrent_downloads) {
                 statuses[i] = PageStatus::Loading(0);
@@ -188,7 +185,7 @@ impl MangoClient {
 
             match command {
                 ManagerCommand::SwitchPage { page_num } => {
-                    opened_page.store(page_num, Ordering::Release);
+                    opened_page = page_num;
                 }
                 ManagerCommand::DownloadError { page_num } => {
                     let new_download_command = DownloadingsSpawnerCommand::NewDownload { page_num };
@@ -200,6 +197,9 @@ impl MangoClient {
                     tracing::trace!("manager sent {new_download_command:#?} command to set");
                 }
                 ManagerCommand::DownloadedSuccessfully { page_num } => {
+                    // TODO: i probably want to shutdown here, if we get an error, this means that
+                    // viewer was dropped and, therefore, noone is interested in this chapter right
+                    // now
                     // NOTE: we don't care if the receiver is no longer interested in this
                     // information
                     if let Some(sender) = &downloadings_sender {
@@ -207,12 +207,8 @@ impl MangoClient {
                     };
 
                     // TODO: i'm not sure if this scope is required
-                    let (next_download_page, found_loading_pages) = {
-                        Self::determine_next_download_page(
-                            &mut statuses.lock().expect("mutex poisoined"),
-                            opened_page.load(Ordering::Acquire),
-                        )
-                    };
+                    let (next_download_page, found_loading_pages) =
+                        { Self::determine_next_download_page(&mut statuses.lock(), opened_page) };
 
                     match next_download_page {
                         Some(page) => {
@@ -248,13 +244,13 @@ impl MangoClient {
     }
 
     pub(crate) async fn handle_downloading_page_request_error(
-        e: reqwest::Error,
+        error: reqwest::Error,
         manager_command_sender: &mpsc::Sender<ManagerCommand>,
         page_num: usize,
     ) {
         // TODO: handle possible errors
 
-        tracing::warn!("got respond from the server: {e:#?}");
+        tracing::warn!("got respond from the server: {error:#?}");
 
         manager_command_sender
             .send(ManagerCommand::DownloadError { page_num })
@@ -326,7 +322,7 @@ impl MangoClient {
                         .expect("failed to save page");
 
                     {
-                        let mut statuses = statuses.lock().expect("mutex poisoned");
+                        let mut statuses = statuses.lock();
                         let already_loaded = match statuses[page_num - 1] {
                             PageStatus::Loading(percent) => percent,
                             _ => unreachable!(),
@@ -339,7 +335,7 @@ impl MangoClient {
                 }
 
                 {
-                    let mut statuses = statuses.lock().expect("mutex poisoned");
+                    let mut statuses = statuses.lock();
                     statuses[page_num - 1] = PageStatus::Loaded(out_page_filename.into());
                 }
 
@@ -444,14 +440,12 @@ impl MangoClient {
             ReceiverStream::new(downloadings_spawner_command_receiver);
 
         let res = ChapterViewer {
-            opened_page: Arc::new(AtomicUsize::new(1)),
             downloadings: downloading_receiver,
-            meta: download_meta,
             statuses: buf,
             submit_switch: manager_command_sender.clone(),
         };
 
-        let chapter_download_dir = format!("tmp/{}", res.meta.chapter.hash);
+        let chapter_download_dir = format!("tmp/{}", download_meta.chapter.hash);
         if !std::fs::exists(&chapter_download_dir).expect("failed to get info about tmp directory")
         {
             std::fs::create_dir_all(&chapter_download_dir)
@@ -466,7 +460,7 @@ impl MangoClient {
         }
 
         task::spawn(Self::downloadings_manager(
-            Arc::clone(&res.opened_page),
+            1,
             Arc::clone(&res.statuses),
             downloadings_spawner_command_sender.clone(),
             Some(downloadings_sender),
@@ -477,7 +471,7 @@ impl MangoClient {
 
         task::spawn(Self::downloadings_spawner(
             self.clone(),
-            res.meta.clone(),
+            download_meta.clone(),
             downloadings_spawner_command_receiver,
             manager_command_sender,
             Arc::clone(&res.statuses),

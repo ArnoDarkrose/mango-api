@@ -1,5 +1,6 @@
 // TODO: add bon
-// TODO: remove unnecessary Serialize and Deserialize derives
+// TODO: add timeout to open_page
+// TODO: test with parking_lot mutex
 
 pub mod requests;
 pub mod viewer;
