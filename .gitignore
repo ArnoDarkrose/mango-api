@@ -1,15 +1,7 @@
 /target
 /pages
 /tmp
-out
-full_res
-manga_struct
-chapters_struct
-chapters_meta
-test_pages 
-test_iter
-page_paths
+/test_files
 exp.rs
 logs
-scanlation_group_name_test
 

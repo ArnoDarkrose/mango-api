@@ -71,7 +71,7 @@ pub struct MangaAttributes {
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Manga {
     pub id: String,
     #[serde(rename(deserialize = "type"))]

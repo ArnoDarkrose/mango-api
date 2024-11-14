@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{EntityType, LocalizedString, Relationship};
+use super::{Entity, EntityType, LocalizedString, Relationship};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -27,6 +27,8 @@ pub struct Tag {
     pub attributes: TagAttributes,
     pub relationships: Vec<Relationship>,
 }
+
+impl Entity for Tag {}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "UPPERCASE")]
