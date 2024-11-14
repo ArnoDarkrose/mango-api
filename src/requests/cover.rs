@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::{EntityType, Locale, Relationship};
+use super::query_utils::Relationship;
+use super::{EntityType, Locale};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]

@@ -3,11 +3,11 @@ use serde_json::Value;
 
 use std::collections::HashMap;
 
-use super::tag::{Tag, TagsMode};
-use super::{
-    ContentRating, Entity, EntityType, Locale, LocalizedString, PublicationDemographic, Query,
-    Relationship, SortingOptions,
+use super::query_utils::{
+    ContentRating, LocalizedString, PublicationDemographic, Query, Relationship, SortingOptions,
 };
+use super::tag::{Tag, TagsMode};
+use super::{Entity, EntityType, Locale};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
@@ -135,3 +135,24 @@ pub struct MangaFeedQuery {
 }
 
 impl Query for MangaFeedQuery {}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum MangaRelation {
+    Monochrome,
+    MainStory,
+    AdaptedFrom,
+    BasedOn,
+    Prequel,
+    SideStory,
+    Doujinshi,
+    SameFranchise,
+    SharedUniverse,
+    Sequel,
+    SpinOff,
+    AlternateStory,
+    AlternateVersion,
+    Preserialization,
+    Colored,
+    Serialization,
+}

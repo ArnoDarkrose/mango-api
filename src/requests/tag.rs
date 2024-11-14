@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Entity, EntityType, LocalizedString, Relationship};
+use super::query_utils::{LocalizedString, Relationship};
+use super::{Entity, EntityType};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
