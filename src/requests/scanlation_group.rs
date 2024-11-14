@@ -15,7 +15,6 @@ pub struct ScanlationGroupAttributes {
     pub description: Option<String>,
     pub twitter: Option<String>,
     pub manga_updates: Option<String>,
-    // NOTE: this may be a bug as this possibly may be any string, not just locale
     pub focused_language: Option<Vec<Locale>>,
     pub locked: bool,
     pub official: bool,

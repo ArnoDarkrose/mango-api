@@ -1,5 +1,3 @@
-// TODO: make a proper work on errors, sticking everything into one big error is bad
-
 pub mod chapter;
 pub mod cover;
 pub mod manga;
@@ -11,7 +9,7 @@ use crate::viewer::PageStatus;
 use chapter::{Chapter, ChapterDownloadMeta};
 use cover::CoverArtAttributes;
 use manga::{Manga, MangaFeedQuery, MangaQuery};
-use query_utils::{EmptyQuery, EntityType, Locale, Query, ResultOk as _};
+use query_utils::{EmptyQuery, EntityType, Locale, Query, ResponseResultOk as _};
 use scanlation_group::ScanlationGroup;
 use tag::Tag;
 
@@ -20,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use reqwest::{Client, Response};
+use reqwest::{Client, Response, StatusCode};
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
 
@@ -36,7 +34,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct BadResponseError {
+pub struct ServerResponseError {
     id: String,
     status: i32,
     title: String,
@@ -47,15 +45,19 @@ pub struct BadResponseError {
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
-    RequestError(#[from] reqwest::Error),
+    ReqwestError(#[from] reqwest::Error),
     #[error(transparent)]
     RequestWithMiddleWareError(#[from] reqwest_middleware::Error),
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
     #[error("error while parsing json value")]
     ParseError,
-    #[error("400 server respond")]
-    BadResponseError(Vec<BadResponseError>),
+    #[error("400 server response")]
+    BadRequestError(Vec<ServerResponseError>),
+    #[error("404 server response")]
+    NotFoundError(Vec<ServerResponseError>),
+    #[error("403 server respose")]
+    ForbiddenError(Vec<ServerResponseError>),
     #[error(transparent)]
     QsError(#[from] serde_qs::Error),
     #[error(transparent)]
@@ -102,7 +104,7 @@ impl MangoClient {
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
     {
-        let responded_without_errors = resp.result_ok()?;
+        let responded_without_errors = resp.response_result_ok()?;
 
         if responded_without_errors {
             let data = match resp.get_mut("data") {
@@ -117,9 +119,9 @@ impl MangoClient {
                 None => return Err(Error::ParseError),
             };
 
-            let err: Vec<BadResponseError> = serde_json::from_value(errors.take())?;
+            let err: Vec<ServerResponseError> = serde_json::from_value(errors.take())?;
 
-            Err(Error::BadResponseError(err))
+            Err(Error::BadRequestError(err))
         }
     }
 
@@ -218,16 +220,14 @@ impl MangoClient {
             .json()
             .await?;
 
-        let responded_without_errors = resp.result_ok()?;
+        let responded_without_errors = resp.response_result_ok()?;
 
         if responded_without_errors {
             Ok(serde_json::from_value(resp)?)
         } else {
-            Err(Error::BadResponseError(serde_json::from_value::<
-                Vec<BadResponseError>,
-            >(
-                resp["errors"].take()
-            )?))
+            Err(Error::BadRequestError(serde_json::from_value::<
+                Vec<ServerResponseError>,
+            >(resp["errors"].take())?))
         }
     }
 
@@ -270,43 +270,57 @@ impl MangoClient {
 
         match resp.bytes().await {
             Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
+            Err(e) => Err(Error::ReqwestError(e)),
         }
+    }
+
+    async fn deserialize_reponse_error<T: std::fmt::Debug>(resp: Response) -> Result<T> {
+        let status = resp.status();
+
+        let errors = resp.json::<Value>().await?["errors"].take();
+        let e: Vec<ServerResponseError> = serde_json::from_value(errors)?;
+
+        let res = match status {
+            StatusCode::BAD_REQUEST => Err(Error::BadRequestError(e)),
+            StatusCode::FORBIDDEN => Err(Error::ForbiddenError(e)),
+            StatusCode::NOT_FOUND => Err(Error::NotFoundError(e)),
+            _ => {
+                unreachable!()
+            }
+        };
+
+        tracing::warn!("got {res:#?} from server");
+
+        res
     }
 
     #[tracing::instrument]
     pub async fn download_full_page(&self, url: &str) -> Result<Bytes> {
-        // TODO: this a problem: when the url is invalid (for example some time passed and it invalidated)
-        // i might get something like 404 reponse and i don't handle it here
-        // moreover, i don't handle any possible errors that might be returned from the server
-        // the problem i didn't find the documentation for this query
-
         let resp = self.query(url, &EmptyQuery {}).await?;
-        let status = resp.status();
-        if status != 200 {
-            tracing::warn!("got an error from server: {resp:#?}");
-        }
 
-        match resp.bytes().await {
-            Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestError(e)),
+        if resp.status() != StatusCode::OK {
+            Self::deserialize_reponse_error(resp)
+                .in_current_span()
+                .await
+        } else {
+            match resp.bytes().await {
+                Ok(res) => Ok(res),
+                Err(e) => Err(Error::ReqwestError(e)),
+            }
         }
     }
 
     #[tracing::instrument]
     pub async fn get_page_chunks(&self, url: &str) -> Result<Response> {
-        // TODO: this a problem: when the url is invalid (for example some time passed and it invalidated)
-        // i might get something like 404 reponse and i don't handle it here
-        // moreover, i don't handle any possible errors that might be returned from the server
-        // the problem i didn't find the documentation for this query
-
         let resp = self.query(url, &EmptyQuery {}).await?;
-        let status = resp.status();
-        if status != 200 {
-            tracing::warn!("got an error from server: {resp:#?}");
-        }
 
-        Ok(resp)
+        if resp.status() != StatusCode::OK {
+            Self::deserialize_reponse_error(resp)
+                .in_current_span()
+                .await
+        } else {
+            Ok(resp)
+        }
     }
 
     #[tracing::instrument(skip(self))]

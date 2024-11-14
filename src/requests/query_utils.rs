@@ -272,13 +272,12 @@ pub enum PublicationDemographic {
     Seinen,
 }
 
-// TODO: rename this
-pub trait ResultOk {
-    fn result_ok(&self) -> Result<bool>;
+pub trait ResponseResultOk {
+    fn response_result_ok(&self) -> Result<bool>;
 }
 
-impl ResultOk for Value {
-    fn result_ok(&self) -> Result<bool> {
+impl ResponseResultOk for Value {
+    fn response_result_ok(&self) -> Result<bool> {
         let result = match self.get("result") {
             Some(status) => status,
             None => return Err(Error::ParseError),

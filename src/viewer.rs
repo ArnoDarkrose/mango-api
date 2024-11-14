@@ -12,7 +12,7 @@ use tokio::task::{self, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
-use bon::{bon, builder};
+use bon::bon;
 use bytes::Bytes;
 use reqwest::Response;
 use tracing::instrument::Instrument as _;
@@ -198,46 +198,52 @@ impl MangoClient {
                     spawner_command_sender
                         .send(new_download_command)
                         .await
-                        .expect("join_set task shutdowned before downloading all pages");
+                        .expect("downloadings_spawner shutdowned before downloading all pages");
 
                     tracing::trace!("manager sent {new_download_command:#?} command to set");
                 }
                 ManagerCommand::DownloadedSuccessfully { page_num } => {
-                    // TODO: i probably want to shutdown here, if we get an error, this means that
-                    // viewer was dropped and, therefore, noone is interested in this chapter right
-                    // now
-                    // NOTE: we don't care if the receiver is no longer interested in this
-                    // information
+                    // NOTE: if the receiver is dropped, than nobody is interested in downloading this
+                    // chapter at the moment, so we can shutdown
                     if let Some(sender) = &downloadings_sender {
-                        let _ = sender.send(page_num).await;
+                        if let Err(e) = sender.send(page_num).await {
+                            tracing::debug!(
+                                "got error {e}: downloadings receiver dropped, shutting down downloadings manager"
+                            );
+
+                            let command = DownloadingsSpawnerCommand::Shutdown;
+                            spawner_command_sender.send(command).await.expect(
+                                "downloadings_spawner shutdowned before the respectful command",
+                            );
+
+                            tracing::trace!("manager sent {command:#?} command to set");
+
+                            break;
+                        }
                     };
 
-                    // TODO: i'm not sure if this scope is required
                     let (next_download_page, found_loading_pages) =
-                        { Self::determine_next_download_page(&mut statuses.lock(), opened_page) };
+                        Self::determine_next_download_page(&mut statuses.lock(), opened_page);
 
                     match next_download_page {
                         Some(page) => {
                             let command =
                                 DownloadingsSpawnerCommand::NewDownload { page_num: page };
 
-                            spawner_command_sender
-                                .send(command)
-                                .await
-                                .expect("join_set task shutdowned before downloading all pages");
+                            spawner_command_sender.send(command).await.expect(
+                                "downloadings_spawner shutdowned before downloading all pages",
+                            );
 
                             tracing::trace!("manager sent {command:#?} command to set");
                         }
                         None => {
                             if !found_loading_pages {
-                                spawner_command_sender
-                                    .send(DownloadingsSpawnerCommand::Shutdown)
-                                    .await
-                                    .expect(
-                                        "join_set task shutdowned before the respectful command",
-                                    );
+                                let command = DownloadingsSpawnerCommand::Shutdown;
+                                spawner_command_sender.send(command).await.expect(
+                                    "join_set task shutdowned before the respectful command",
+                                );
 
-                                tracing::trace!("manager sent shutdown command to set");
+                                tracing::trace!("manager sent {command:#?} command to set");
 
                                 break;
                             }
@@ -249,14 +255,12 @@ impl MangoClient {
         tracing::debug!("shutdowned");
     }
 
-    pub(crate) async fn handle_downloading_page_request_error(
-        error: reqwest::Error,
+    pub(crate) async fn handle_downloading_page_error(
+        error: Error,
         manager_command_sender: &mpsc::Sender<ManagerCommand>,
         page_num: usize,
     ) {
-        // TODO: handle possible errors
-
-        tracing::warn!("got respond from the server: {error:#?}");
+        tracing::warn!("got response from the server: {error:#?}");
 
         manager_command_sender
             .send(ManagerCommand::DownloadError { page_num })
@@ -278,9 +282,13 @@ impl MangoClient {
                 (chunk, with_errors)
             }
             Err(e) => {
-                Self::handle_downloading_page_request_error(e, manager_command_sender, page_num)
-                    .in_current_span()
-                    .await;
+                Self::handle_downloading_page_error(
+                    Error::ReqwestError(e),
+                    manager_command_sender,
+                    page_num,
+                )
+                .in_current_span()
+                .await;
 
                 let with_errors = true;
                 (None, with_errors)
@@ -357,20 +365,11 @@ impl MangoClient {
                     );
             }
 
-            Err(e) => match e {
-                Error::RequestError(e) => {
-                    Self::handle_downloading_page_request_error(
-                        e,
-                        &manager_command_sender,
-                        page_num,
-                    )
+            Err(e) => {
+                Self::handle_downloading_page_error(e, &manager_command_sender, page_num)
                     .in_current_span()
                     .await;
-                }
-                _ => {
-                    panic!("Got an unexpected error from download page process")
-                }
-            },
+            }
         }
     }
 
@@ -395,7 +394,7 @@ impl MangoClient {
                     break;
                 }
                 DownloadingsSpawnerCommand::NewDownload { page_num } => {
-                    // NOTE: we don't care about the result of the computations, this is simply
+                    // HACK: we don't care about the result of the computations, this is simply
                     // for the sake of buffer not overflowing
                     let _ = set.try_join_next();
 
