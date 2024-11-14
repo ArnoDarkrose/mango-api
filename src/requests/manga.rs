@@ -9,6 +9,8 @@ use super::query_utils::{
 use super::tag::{Tag, TagsMode};
 use super::{Entity, EntityType, Locale};
 
+use bon::Builder;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum MangaStatus {
@@ -82,7 +84,8 @@ pub struct Manga {
 
 impl Entity for Manga {}
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(on(String, into))]
 #[serde(rename_all = "camelCase")]
 pub struct MangaQuery {
     pub limit: Option<usize>,
@@ -113,7 +116,8 @@ pub struct MangaQuery {
 
 impl Query for MangaQuery {}
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
+#[builder(on(String, into))]
 #[serde(rename_all = "camelCase")]
 pub struct MangaFeedQuery {
     pub limit: Option<usize>,

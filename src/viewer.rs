@@ -12,6 +12,7 @@ use tokio::task::{self, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
 
+use bon::{bon, builder};
 use bytes::Bytes;
 use reqwest::Response;
 use tracing::instrument::Instrument as _;
@@ -101,6 +102,7 @@ impl ChapterViewer {
     }
 }
 
+#[bon]
 impl MangoClient {
     pub(crate) fn determine_next_download_page(
         statuses: &mut parking_lot::MutexGuard<'_, Vec<PageStatus>>,
@@ -149,16 +151,20 @@ impl MangoClient {
         }
     }
 
-    #[tracing::instrument(skip(
-        statuses,
-        set_command_sender,
-        downloadings_sender,
-        command_receiver
-    ))]
+    #[builder]
+    #[tracing::instrument(
+        skip(
+            statuses,
+            spawner_command_sender,
+            downloadings_sender,
+            command_receiver
+        ),
+        name = "downloadings_manager"
+    )]
     pub(crate) async fn downloadings_manager(
         mut opened_page: usize,
         statuses: Arc<Mutex<Vec<PageStatus>>>,
-        set_command_sender: mpsc::Sender<DownloadingsSpawnerCommand>,
+        spawner_command_sender: mpsc::Sender<DownloadingsSpawnerCommand>,
         downloadings_sender: Option<mpsc::Sender<usize>>,
         mut command_receiver: ReceiverStream<ManagerCommand>,
         max_concurrent_downloads: usize,
@@ -173,7 +179,7 @@ impl MangoClient {
         }
 
         for i in 0..chapter_size.min(max_concurrent_downloads) {
-            set_command_sender
+            spawner_command_sender
                 .send(DownloadingsSpawnerCommand::NewDownload { page_num: i + 1 })
                 .await
                 .expect("task spawner shutdowned before downloading all pages");
@@ -189,7 +195,7 @@ impl MangoClient {
                 }
                 ManagerCommand::DownloadError { page_num } => {
                     let new_download_command = DownloadingsSpawnerCommand::NewDownload { page_num };
-                    set_command_sender
+                    spawner_command_sender
                         .send(new_download_command)
                         .await
                         .expect("join_set task shutdowned before downloading all pages");
@@ -215,7 +221,7 @@ impl MangoClient {
                             let command =
                                 DownloadingsSpawnerCommand::NewDownload { page_num: page };
 
-                            set_command_sender
+                            spawner_command_sender
                                 .send(command)
                                 .await
                                 .expect("join_set task shutdowned before downloading all pages");
@@ -224,7 +230,7 @@ impl MangoClient {
                         }
                         None => {
                             if !found_loading_pages {
-                                set_command_sender
+                                spawner_command_sender
                                     .send(DownloadingsSpawnerCommand::Shutdown)
                                     .await
                                     .expect(
@@ -282,7 +288,11 @@ impl MangoClient {
         }
     }
 
-    #[tracing::instrument(skip(client, statuses, manager_command_sender))]
+    #[builder]
+    #[tracing::instrument(
+        skip(client, statuses, manager_command_sender),
+        name = "downloading_page"
+    )]
     pub(crate) async fn downloading_page(
         client: MangoClient,
         chapter_hash: String,
@@ -364,7 +374,8 @@ impl MangoClient {
         }
     }
 
-    #[tracing::instrument(skip_all)]
+    #[builder]
+    #[tracing::instrument(skip_all, name = "downloadings_spawner")]
     pub(crate) async fn downloadings_spawner(
         client: MangoClient,
         meta: ChapterDownloadMeta,
@@ -395,14 +406,16 @@ impl MangoClient {
                         &meta.chapter.data[page_num - 1]
                     );
 
-                    set.spawn(Self::downloading_page(
-                        client.clone(),
-                        meta.chapter.hash.clone(),
-                        page_num,
-                        download_url,
-                        Arc::clone(&statuses),
-                        manager_command_sender.clone(),
-                    ));
+                    let downloading_page = Self::downloading_page()
+                        .client(client.clone())
+                        .chapter_hash(meta.chapter.hash.clone())
+                        .page_num(page_num)
+                        .url(download_url)
+                        .statuses(Arc::clone(&statuses))
+                        .manager_command_sender(manager_command_sender.clone())
+                        .call();
+
+                    set.spawn(downloading_page);
 
                     tracing::trace!("spawned new download task");
                 }
@@ -459,23 +472,27 @@ impl MangoClient {
             }
         }
 
-        task::spawn(Self::downloadings_manager(
-            1,
-            Arc::clone(&res.statuses),
-            downloadings_spawner_command_sender.clone(),
-            Some(downloadings_sender),
-            manager_command_receiver,
-            max_concurrent_downloads,
-            chapter_size,
-        ));
+        let manager = Self::downloadings_manager()
+            .opened_page(1)
+            .statuses(Arc::clone(&res.statuses))
+            .spawner_command_sender(downloadings_spawner_command_sender.clone())
+            .downloadings_sender(downloadings_sender)
+            .command_receiver(manager_command_receiver)
+            .max_concurrent_downloads(max_concurrent_downloads)
+            .chapter_size(chapter_size)
+            .call();
 
-        task::spawn(Self::downloadings_spawner(
-            self.clone(),
-            download_meta.clone(),
-            downloadings_spawner_command_receiver,
-            manager_command_sender,
-            Arc::clone(&res.statuses),
-        ));
+        task::spawn(manager);
+
+        let spawner = Self::downloadings_spawner()
+            .client(self.clone())
+            .meta(download_meta)
+            .command_receiver(downloadings_spawner_command_receiver)
+            .manager_command_sender(manager_command_sender)
+            .statuses(Arc::clone(&res.statuses))
+            .call();
+
+        task::spawn(spawner);
 
         return Ok(res);
     }

@@ -349,23 +349,26 @@ impl MangoClient {
             }
         }
 
-        let manager = task::spawn(Self::downloadings_manager(
-            1,
-            Arc::clone(&buf),
-            downloadings_spawner_command_sender.clone(),
-            None,
-            manager_command_receiver,
-            max_concurrent_downloads,
-            chapter_size,
-        ));
+        let manager = Self::downloadings_manager()
+            .opened_page(1)
+            .statuses(Arc::clone(&buf))
+            .spawner_command_sender(downloadings_spawner_command_sender.clone())
+            .command_receiver(manager_command_receiver)
+            .max_concurrent_downloads(max_concurrent_downloads)
+            .chapter_size(chapter_size)
+            .call();
 
-        task::spawn(Self::downloadings_spawner(
-            self.clone(),
-            download_meta,
-            downloadings_spawner_command_receiver,
-            manager_command_sender,
-            buf,
-        ));
+        let manager = task::spawn(manager);
+
+        let spawner = Self::downloadings_spawner()
+            .client(self.clone())
+            .meta(download_meta)
+            .command_receiver(downloadings_spawner_command_receiver)
+            .manager_command_sender(manager_command_sender)
+            .statuses(buf)
+            .call();
+
+        task::spawn(spawner);
 
         if let Err(e) = manager.await {
             tracing::warn!("downloadings manager finished with error: {e:#?}");
@@ -393,16 +396,12 @@ mod tests {
     #[tokio::test]
     async fn test_search_manga() {
         let client = MangoClient::new().unwrap();
-        let resp = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw man".to_string()),
-                // status: Some(vec![MangaStatus::Ongoing]),
-                // year: Some(2015),
-                // original_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            // .status(vec![MangaStatus::Ongoing])
+            // .original_language(vec![Locale::En])
+            .build();
+        let resp = client.search_manga(&query).await.unwrap();
 
         let mut out = tokio::fs::File::create("test_files/manga_struct")
             .await
@@ -417,26 +416,21 @@ mod tests {
     async fn test_get_manga_feed() {
         let client = MangoClient::new().unwrap();
 
-        let chainsaw_manga_id = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw Man".to_string()),
-                available_translated_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
+        let query = MangaQuery::builder()
+            .title("Chainsaw Man")
+            .available_translated_language(vec![Locale::En])
+            .build();
+
+        let chainsaw_manga_id = client.search_manga(&query).await.unwrap()[0].id.clone();
 
         let mut query_sorting_options = HashMap::new();
 
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -456,25 +450,20 @@ mod tests {
     async fn test_chapter_download() {
         let client = MangoClient::new().unwrap();
 
-        let chainsaw_manga_id = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw Man".to_string()),
-                available_translated_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            .available_translated_language(vec![Locale::En])
+            .build();
+
+        let chainsaw_manga_id = client.search_manga(&query).await.unwrap()[0].id.clone();
 
         let mut query_sorting_options = HashMap::new();
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -518,26 +507,21 @@ mod tests {
     async fn test_get_scanlation_group() {
         let client = MangoClient::new().unwrap();
 
-        let chainsaw_manga_id = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw Man".to_string()),
-                available_translated_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            .available_translated_language(vec![Locale::En])
+            .build();
+
+        let chainsaw_manga_id = client.search_manga(&query).await.unwrap()[0].id.clone();
 
         let mut query_sorting_options = HashMap::new();
 
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -580,32 +564,27 @@ mod tests {
     async fn test_pageness() {
         let client = MangoClient::new().unwrap();
 
-        let chainsaw_manga_id = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw Man".to_string()),
-                available_translated_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            .available_translated_language(vec![Locale::En])
+            .build();
+
+        let chainsaw_manga_id = client.search_manga(&query).await.unwrap()[0].id.clone();
 
         let mut query_sorting_options = HashMap::new();
 
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            limit: Some(200),
-            offset: Some(1),
-            excluded_groups: Some(vec![
-                "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb".to_string(),
-                "a38fc704-90ab-452f-9336-59d84997a9ce".to_string(),
-            ]),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .limit(200)
+            .offset(1)
+            .excluded_groups(vec![
+                "4f1de6a2-f0c5-4ac5-bce5-02c7dbb67deb".to_owned(),
+                "a38fc704-90ab-452f-9336-59d84997a9ce".to_owned(),
+            ])
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -663,11 +642,10 @@ mod tests {
 
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -698,26 +676,21 @@ mod tests {
     async fn test_download_full_chapter() {
         let client = MangoClient::new().unwrap();
 
-        let chainsaw_manga_id = client
-            .search_manga(&MangaQuery {
-                title: Some("Chainsaw Man".to_string()),
-                available_translated_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap()[0]
-            .id
-            .clone();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            .available_translated_language(vec![Locale::En])
+            .build();
+
+        let chainsaw_manga_id = client.search_manga(&query).await.unwrap()[0].id.clone();
 
         let mut query_sorting_options = HashMap::new();
 
         query_sorting_options.insert(OrderOption::Chapter, Order::Asc);
 
-        let query_data = MangaFeedQuery {
-            translated_language: Some(vec![Locale::En]),
-            order: Some(query_sorting_options),
-            ..Default::default()
-        };
+        let query_data = MangaFeedQuery::builder()
+            .translated_language(vec![Locale::En])
+            .order(query_sorting_options)
+            .build();
 
         let chapters = client
             .get_manga_feed(&chainsaw_manga_id, &query_data)
@@ -743,16 +716,13 @@ mod tests {
     #[tokio::test]
     async fn test_get_manga_include_cover() {
         let client = MangoClient::new().unwrap();
-        let resp = client
-            .search_manga_include_cover(&MangaQuery {
-                title: Some("Chainsaw man".to_string()),
-                // status: Some(vec![MangaStatus::Ongoing]),
-                // year: Some(2015),
-                // original_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            // .status(vec![MangaStatus::Ongoing])
+            // .original_language(vec![Locale::En])
+            .build();
+
+        let resp = client.search_manga_include_cover(&query).await.unwrap();
 
         let manga = resp[0].clone();
 
@@ -793,16 +763,14 @@ mod tests {
     #[tokio::test]
     async fn test_get_manga_with_cover() {
         let client = MangoClient::new().unwrap();
-        let resp = client
-            .search_manga_with_cover(&MangaQuery {
-                title: Some("Chainsaw man".to_string()),
-                // status: Some(vec![MangaStatus::Ongoing]),
-                // year: Some(2015),
-                // original_language: Some(vec![Locale::En]),
-                ..Default::default()
-            })
-            .await
-            .unwrap();
+
+        let query = MangaQuery::builder()
+            .title("Chainsaw man")
+            // .status(vec![MangaStatus::Ongoing])
+            // .original_language(vec![Locale::En])
+            .build();
+
+        let resp = client.search_manga_with_cover(&query).await.unwrap();
 
         let (chainsaw_manga, chainsaw_cover) = resp[0].clone();
 

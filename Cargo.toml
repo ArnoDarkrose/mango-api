@@ -9,6 +9,7 @@ description = "API for the manga reading tool"
 
 [dependencies]
 async-stream = "0.3.6"
+bon = "3.0.0"
 bytes = "1.8.0"
 futures = "0.3.31"
 kdam = "0.6.0"
