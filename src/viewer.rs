@@ -1,5 +1,8 @@
+//! Placement for most of the internal structs and functions related to the [ChapterViewer]
+
 use crate::requests::chapter::ChapterDownloadMeta;
-use crate::requests::{Error, MangoClient, Result};
+use crate::requests::{Error, Result};
+use crate::MangoClient;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +40,8 @@ pub(crate) enum DownloadingsSpawnerCommand {
     NewDownload { page_num: usize },
 }
 
+/// The struct used for getting access to chapter pages that are being downloaded via
+/// [MangoClient::chapter_viewer]
 #[derive(Debug)]
 pub struct ChapterViewer {
     pub(crate) statuses: Arc<Mutex<Vec<PageStatus>>>,
@@ -46,6 +51,7 @@ pub struct ChapterViewer {
 
 impl ChapterViewer {
     #[tracing::instrument(skip(self))]
+    /// Returns the path to the desired page
     pub async fn open_page(&mut self, page_num: usize) -> PathBuf {
         tracing::trace!("entered");
 
@@ -424,6 +430,20 @@ impl MangoClient {
         tracing::debug!("shutdowned");
     }
 
+    /// Setups new [ChapterViewer] instance.
+    /// The gist of how this works is as following.
+    ///
+    /// This function creates two working green threads:
+    /// - downloadings_manager
+    /// - downloadings_spawner
+    ///
+    /// These threads interact with each other via channels.
+    /// Manager is responsible for deciding what to download next and an overall process status.
+    /// Spawner is responsible for creating small green thread downloaders for each page.
+    /// The maximum number of concurrently downloading pages is specified by `max_concurrent_downloads` .
+    /// The function returnes an instance of [ChapterViewer] that can be used to interact with
+    /// the manager task by means of the [`open_page`](ChapterViewer::open_page) function.
+    /// Working threads shutdown when the [ChapterViewer] is dropped or when all pages are downloaded
     #[tracing::instrument(skip(self))]
     pub async fn chapter_viewer(
         &self,

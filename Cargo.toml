@@ -7,6 +7,9 @@ repository = "https://github.com/ArnoDarkrose/mango-api.git"
 license-file = "LICENSE"
 description = "API for the manga reading tool"
 
+[lib]
+doctest = false
+
 [dependencies]
 async-stream = "0.3.6"
 bon = "3.0.0"

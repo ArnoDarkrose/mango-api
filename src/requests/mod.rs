@@ -1,3 +1,5 @@
+//! Structs and utilities for making requests to mangadex servers
+
 pub mod chapter;
 pub mod cover;
 pub mod manga;
@@ -6,6 +8,7 @@ pub mod scanlation_group;
 pub mod tag;
 
 use crate::viewer::PageStatus;
+use crate::MangoClient;
 use chapter::{Chapter, ChapterDownloadMeta};
 use cover::CoverArtAttributes;
 use manga::{Manga, MangaFeedQuery, MangaQuery};
@@ -18,9 +21,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
-use reqwest::{Client, Response, StatusCode};
-use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
-use reqwest_tracing::TracingMiddleware;
+use reqwest::{Response, StatusCode};
 
 use tokio::sync::mpsc;
 use tokio::task;
@@ -33,6 +34,7 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
+/// Used to deserialize errors returned from server
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerResponseError {
     id: String,
@@ -42,6 +44,7 @@ pub struct ServerResponseError {
     context: Option<String>,
 }
 
+/// Custom error type that contains all errors that this can be emitted by this crate's functions
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
@@ -66,28 +69,17 @@ pub enum Error {
     IoError(#[from] std::io::Error),
 }
 
+/// Type alias for the [`Result`](std::result::Result) that is used in the crate's functions
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// [Entity] is implemented for all structs that represent Entity types in terms used by mangadex servers
 pub trait Entity {}
 impl<T: Entity> Entity for Vec<T> {}
-
-#[derive(Clone, Debug)]
-pub struct MangoClient {
-    client: ClientWithMiddleware,
-}
 
 impl MangoClient {
     pub const BASE_URL: &str = "https://api.mangadex.org";
 
-    pub fn new() -> Result<Self> {
-        let res = Client::builder().user_agent("Mango/1.0").build()?;
-        let res = ClientBuilder::new(res)
-            .with(TracingMiddleware::default())
-            .build();
-
-        Ok(Self { client: res })
-    }
-
+    /// Lowest level function that executes arbitrary [Query] and returnes its response
     #[tracing::instrument]
     pub async fn query(&self, base_url: &str, query: &impl Query) -> Result<Response> {
         let query_data = match serde_qs::to_string(query) {
@@ -102,6 +94,7 @@ impl MangoClient {
         }
     }
 
+    /// Deserializes responses that can be deserialized into [Entity] or a [`Vec`] of entities
     pub async fn parse_respond_data<T>(mut resp: Value) -> Result<T>
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
@@ -127,6 +120,7 @@ impl MangoClient {
         }
     }
 
+    /// Searches for manga with parameteres, specified by data
     #[tracing::instrument]
     pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
         let resp: Value = self
@@ -138,6 +132,8 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    /// Essentially the same as [`search_manga`](MangoClient::search_manga) but the returned response would also contain information
+    /// about covers for each entry
     #[tracing::instrument]
     pub async fn search_manga_include_cover(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
         let mut data = data.clone();
@@ -152,6 +148,8 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    /// Executes [`search_manga_include_cover`](MangoClient::search_manga_include_cover) and downloads cover
+    /// for each entry. Returns each search entry paired with byte respresentation of its cover
     #[tracing::instrument]
     pub async fn search_manga_with_cover(&self, data: &MangaQuery) -> Result<Vec<(Manga, Bytes)>> {
         let resp = self.search_manga_include_cover(data).await?;
@@ -184,6 +182,7 @@ impl MangoClient {
         Ok(res)
     }
 
+    /// Shorthand for searching manga just by name
     pub async fn search_manga_by_name(&self, name: &str) -> Result<Vec<Manga>> {
         self.search_manga(&MangaQuery {
             title: Some(name.to_string()),
@@ -192,6 +191,8 @@ impl MangoClient {
         .await
     }
 
+    /// The same as [`search_manga_by_name`](MangoClient::search_manga_by_name) combined with
+    /// [`search_manga_include_cover`](MangoClient::search_manga_include_cover)
     pub async fn search_manga_by_name_include_cover(&self, name: &str) -> Result<Vec<Manga>> {
         self.search_manga_include_cover(&MangaQuery {
             title: Some(name.to_string()),
@@ -200,6 +201,7 @@ impl MangoClient {
         .await
     }
 
+    /// Queries for the feed of the manga with the given `id` and parameteres specified by `data`
     #[tracing::instrument]
     pub async fn get_manga_feed(&self, id: &str, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
         let resp: Value = self
@@ -211,6 +213,7 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    /// Queries for the meta info about downloading chapter with the given `id`
     #[tracing::instrument]
     pub async fn get_chapter_download_meta(&self, id: &str) -> Result<ChapterDownloadMeta> {
         let mut resp: Value = self
@@ -233,6 +236,7 @@ impl MangoClient {
         }
     }
 
+    /// Queries for the info about the scanlation group with the specified `id`
     #[tracing::instrument(skip(self))]
     pub async fn get_scanlation_group(&self, id: &str) -> Result<ScanlationGroup> {
         let resp: Value = self
@@ -247,6 +251,7 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    /// Queries for available tags
     pub async fn get_tags(&self) -> Result<Vec<Tag>> {
         let resp: Value = self
             .query(
@@ -260,6 +265,8 @@ impl MangoClient {
         MangoClient::parse_respond_data(resp).await
     }
 
+    /// Given the name of the cover filename (on mangadex server) and the manga `id`,
+    /// downloads the needed cover art
     #[tracing::instrument(skip(self))]
     pub async fn download_full_cover(&self, manga_id: &str, cover_filename: &str) -> Result<Bytes> {
         let url = format!("https://uploads.mangadex.org/covers/{manga_id}/{cover_filename}");
@@ -276,6 +283,7 @@ impl MangoClient {
         }
     }
 
+    /// Shorthand for deserializing server error response
     async fn deserialize_reponse_error<T: std::fmt::Debug>(resp: Response) -> Result<T> {
         let status = resp.status();
 
@@ -297,6 +305,7 @@ impl MangoClient {
         res
     }
 
+    /// Downloads page from the specified `url`
     #[tracing::instrument]
     pub async fn download_full_page(&self, url: &str) -> Result<Bytes> {
         let resp = self.query(url, &EmptyQuery {}).await?;
@@ -313,6 +322,8 @@ impl MangoClient {
         }
     }
 
+    /// Queries for chunked downloading of the page from the specified `url`.
+    /// The returned [Response] can then be used to download the page chunk by chunk    
     #[tracing::instrument]
     pub async fn get_page_chunks(&self, url: &str) -> Result<Response> {
         let resp = self.query(url, &EmptyQuery {}).await?;
@@ -326,6 +337,9 @@ impl MangoClient {
         }
     }
 
+    /// Downloads the chapter with the specified `id`, uses maximum `max_concurrent downloads` pages
+    /// downloading at each moment of time. Downloaded chapter pages are stored in the directory
+    /// "tmp/{chapter_id}"
     #[tracing::instrument(skip(self))]
     pub async fn download_full_chapter(
         &self,

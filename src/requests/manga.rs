@@ -1,3 +1,9 @@
+//! Utilities for manga specific server part of the application.
+//!
+//! The meaning of most of the confusing structs here can be found at <https://api.mangadex.org/docs/3-enumerations/#manga-links-data>
+//!
+//! All queries encountered here can be constructed with the builder syntax from the [bon] crate
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,6 +17,7 @@ use super::{Entity, EntityType, Locale};
 
 use bon::Builder;
 
+/// Used for serialization/deserialization
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum MangaStatus {
@@ -20,6 +27,8 @@ pub enum MangaStatus {
     Hiatus,
 }
 
+/// Used for serialization/deserialization
+/// If you intend to understand this mess, please refer to <https://api.mangadex.org/docs/3-enumerations/#manga-links-data>
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, std::hash::Hash, Clone)]
 #[serde(rename_all = "camelCase")]
 pub enum MangaLinkSource {
@@ -39,6 +48,7 @@ pub enum MangaLinkSource {
 
 pub type MangaLinks = HashMap<MangaLinkSource, String>;
 
+/// Used for serialization/deserialization
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 #[serde(rename_all = "snake_case")]
 pub enum MangaState {
@@ -48,6 +58,7 @@ pub enum MangaState {
     Rejected,
 }
 
+/// Used for serialization/deserialization
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MangaAttributes {
@@ -73,6 +84,8 @@ pub struct MangaAttributes {
     pub updated_at: String,
 }
 
+/// Used for serialization/deserialization.
+/// Main structure used for representing the response containg manga info
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Manga {
     pub id: String,
@@ -84,6 +97,7 @@ pub struct Manga {
 
 impl Entity for Manga {}
 
+/// Query that is used for parameterization manga searches
 #[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
 #[builder(on(String, into))]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +130,7 @@ pub struct MangaQuery {
 
 impl Query for MangaQuery {}
 
+/// Query used for parameterization of manga feed queries
 #[derive(Serialize, Deserialize, Debug, Clone, Default, Builder)]
 #[builder(on(String, into))]
 #[serde(rename_all = "camelCase")]
@@ -140,6 +155,8 @@ pub struct MangaFeedQuery {
 
 impl Query for MangaFeedQuery {}
 
+/// This struct is used to represent possible relation of [Manga] that can be encountered in
+/// its [Relationship]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "snake_case")]
 pub enum MangaRelation {

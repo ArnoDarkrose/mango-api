@@ -1,8 +1,15 @@
+//! Utilities for chapter specific server part of the application.
+//!
+//! The meaning of most of the confusing structs here can be found at <https://api.mangadex.org/docs/3-enumerations/#manga-links-data>
+//!
+//! All queries encountered here can be constructed with the builder syntax from the [bon] crate
+
 use serde::{Deserialize, Serialize};
 
 use super::query_utils::Relationship;
 use super::{Entity, EntityType, Locale};
 
+/// Used for serialization/deserialization
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterAttributes {
@@ -20,6 +27,7 @@ pub struct ChapterAttributes {
     pub readable_at: String,
 }
 
+/// Main structure used for representing the response containg chapter info
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Chapter {
     pub id: String,
@@ -31,6 +39,7 @@ pub struct Chapter {
 
 impl Entity for Chapter {}
 
+/// Main structure used for representing the response containg chapter meta info
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterMeta {
@@ -39,6 +48,7 @@ pub struct ChapterMeta {
     pub data_saver: Vec<String>,
 }
 
+/// Main structure used for representing the response containg chapter download meta info
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ChapterDownloadMeta {

@@ -1,3 +1,8 @@
+//! Structs and traits used by all queries related stuff.
+//!
+//! The usage of most of the structs encountered here can be clarified by
+//! <https://api.mangadex.org/docs/3-enumerations/#static-data>
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -6,6 +11,7 @@ use super::{Error, Result};
 
 use std::collections::HashMap;
 
+/// Trait used for marking structs that can represent queries
 pub trait Query: Serialize + std::fmt::Debug {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, Copy)]
@@ -207,6 +213,7 @@ pub enum Locale {
 
 pub type LocalizedString = HashMap<Locale, String>;
 
+/// Enumeration of all entities that can be returned from server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
@@ -272,7 +279,7 @@ pub enum PublicationDemographic {
     Seinen,
 }
 
-pub trait ResponseResultOk {
+pub(crate) trait ResponseResultOk {
     fn response_result_ok(&self) -> Result<bool>;
 }
 

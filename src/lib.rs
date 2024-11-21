@@ -1,3 +1,13 @@
+//! Core crate for mango which provides interface for server interaction as well as
+//! as the implementation of an asynchronous chapter donwloader.
+//!
+//! It is recommended to look through the [mangadex API documentation](<https://api.mangadex.org/docs>)
+//! as it can clarify how to use this library.
+//!
+//! For starters, refer to the [MangoClient] struct that provides most of the utilities and functions.
+//! Structs that represent query parameteres from manga, chapter, etc. can be found inside [requests] module
+//! in the respectful modules.
+
 // TODO: add timeout to open_page
 // TODO: test error handling
 // TODO: test the program with model when instead sharing downloadings buffer across tasks,
@@ -6,6 +16,35 @@
 
 pub mod requests;
 pub mod viewer;
+
+use requests::Result;
+use reqwest::Client;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_tracing::TracingMiddleware;
+
+#[doc(hidden)]
+pub use viewer::ChapterViewer;
+
+/// Entry point for most of the crate interactions
+///
+/// Provides functions for interacting with the mangadex servers as well as
+/// the access to the [`ChapterViewer`] struct
+#[derive(Clone, Debug)]
+pub struct MangoClient {
+    client: ClientWithMiddleware,
+}
+
+impl MangoClient {
+    /// Creates new instance of [MangoClient]
+    pub fn new() -> Result<Self> {
+        let res = Client::builder().user_agent("Mango/1.0").build()?;
+        let res = ClientBuilder::new(res)
+            .with(TracingMiddleware::default())
+            .build();
+
+        Ok(Self { client: res })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -235,7 +274,7 @@ mod tests {
         }
 
         let filter = EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
+            .with_default_directive(LevelFilter::TRACE.into())
             .from_env_lossy();
 
         let (_writer, _guard) = tracing_appender::non_blocking(
@@ -246,7 +285,7 @@ mod tests {
             .with(
                 tracing_subscriber::fmt::layer()
                     .with_test_writer()
-                    // .with_writer(_writer)
+                    .with_writer(_writer)
                     .pretty()
                     .compact(),
             )
