@@ -1,4 +1,4 @@
-This crate provides useful functions and structs for interacting with the <mangadex.org> API.
+This crate provides useful functions and structs for interacting with the <https://mangadex.org> API.
 One of the most useful features: asyncrounous chapter downloader that changes its behaviour depending on the currently opened chapter page.
 
 In order to fully understand how to use this library, please look through <https://api.mangadex.org/docs>. This is an official documentation of <mangadex.org> API.
@@ -65,4 +65,4 @@ async fn main() {
 }
 ```
 ### Special thanks
-Big thanks to the <mangadex.org> dev team for providing such a useful API.
+Big thanks to the <https://mangadex.org> dev team for providing such a useful API.
