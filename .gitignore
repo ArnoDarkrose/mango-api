@@ -1,1 +1,7 @@
 /target
+/pages
+/tmp
+/test_files
+exp.rs
+logs
+
