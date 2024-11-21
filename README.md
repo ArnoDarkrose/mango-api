@@ -2,6 +2,7 @@ This crate provides useful functions and structs for interacting with the <https
 One of the most useful features: asyncrounous chapter downloader that changes its behaviour depending on the currently opened chapter page.
 
 In order to fully understand how to use this library, please look through <https://api.mangadex.org/docs>. This is an official documentation of <https://mangadex.org> API.
+This crate uses tracing crate for logging.
 
 ## Example
 ```rust
