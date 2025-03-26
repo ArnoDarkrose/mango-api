@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::manga::MangaRelation;
-use super::{Error, Result};
+use super::{MangoError, MangoResult};
 
 use std::collections::HashMap;
 
@@ -280,14 +280,14 @@ pub enum PublicationDemographic {
 }
 
 pub(crate) trait ResponseResultOk {
-    fn response_result_ok(&self) -> Result<bool>;
+    fn response_result_ok(&self) -> MangoResult<bool>;
 }
 
 impl ResponseResultOk for Value {
-    fn response_result_ok(&self) -> Result<bool> {
+    fn response_result_ok(&self) -> MangoResult<bool> {
         let result = match self.get("result") {
             Some(status) => status,
-            None => return Err(Error::ParseError),
+            None => return Err(MangoError::ParseError),
         };
 
         let responded_without_errors = if result.is_string() {
@@ -295,7 +295,7 @@ impl ResponseResultOk for Value {
 
             result == "ok"
         } else {
-            return Err(Error::ParseError);
+            return Err(MangoError::ParseError);
         };
 
         Ok(responded_without_errors)

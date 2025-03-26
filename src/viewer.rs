@@ -1,8 +1,8 @@
 //! Placement for most of the internal structs and functions related to the [ChapterViewer]
 
-use crate::requests::chapter::ChapterDownloadMeta;
-use crate::requests::{Error, Result};
 use crate::MangoClient;
+use crate::requests::chapter::ChapterDownloadMeta;
+use crate::requests::{MangoError, MangoResult};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,8 +12,8 @@ use parking_lot::Mutex;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::task::{self, JoinSet};
-use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt as _;
+use tokio_stream::wrappers::ReceiverStream;
 
 use bon::bon;
 use bytes::Bytes;
@@ -53,8 +53,6 @@ impl ChapterViewer {
     #[tracing::instrument(skip(self))]
     /// Returns the path to the desired page
     pub async fn open_page(&mut self, page_num: usize) -> PathBuf {
-        tracing::trace!("entered");
-
         tracing::trace!("acquiring mutex lock");
 
         let status = {
@@ -262,7 +260,7 @@ impl MangoClient {
     }
 
     pub(crate) async fn handle_downloading_page_error(
-        error: Error,
+        error: MangoError,
         manager_command_sender: &mpsc::Sender<ManagerCommand>,
         page_num: usize,
     ) {
@@ -289,7 +287,7 @@ impl MangoClient {
             }
             Err(e) => {
                 Self::handle_downloading_page_error(
-                    Error::ReqwestError(e),
+                    MangoError::ReqwestError(e),
                     manager_command_sender,
                     page_num,
                 )
@@ -302,6 +300,7 @@ impl MangoClient {
         }
     }
 
+    // TODO: make this return Result
     #[builder]
     #[tracing::instrument(
         skip(client, statuses, manager_command_sender),
@@ -449,7 +448,7 @@ impl MangoClient {
         &self,
         chapter_id: &str,
         mut max_concurrent_downloads: usize,
-    ) -> Result<ChapterViewer> {
+    ) -> MangoResult<ChapterViewer> {
         max_concurrent_downloads = max_concurrent_downloads.max(1);
 
         let download_meta = self
@@ -487,7 +486,9 @@ impl MangoClient {
                 .expect("failed to create directory for storing pages");
 
             if !dir_meta.is_dir() {
-                panic!("failed to create directory for storing pages: file already exists, not a directory");
+                panic!(
+                    "failed to create directory for storing pages: file already exists, not a directory"
+                );
             }
         }
 

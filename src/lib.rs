@@ -13,11 +13,16 @@
 // TODO: test the program with model when instead sharing downloadings buffer across tasks,
 // this buffer is only held by manager and open_page only gets page information after submitting
 // request to manager
+// TODO: make doctests
+// TODO: it is a bottleneck to save on disk every downloaded page. I should just save it in a buffer of some kind and
+// return refernces to with open_page
+// TODO: remove bon (at least for functions)
+// TODO: a lot of functions panic when they should return Result
 
 pub mod requests;
 pub mod viewer;
 
-use requests::Result;
+use requests::MangoResult;
 use reqwest::Client;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
@@ -36,7 +41,7 @@ pub struct MangoClient {
 
 impl MangoClient {
     /// Creates new instance of [MangoClient]
-    pub fn new() -> Result<Self> {
+    pub fn new() -> MangoResult<Self> {
         let res = Client::builder().user_agent("Mango/1.0").build()?;
         let res = ClientBuilder::new(res)
             .with(TracingMiddleware::default())
@@ -229,6 +234,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_pageness() {
+        {
+            std::fs::File::create("logs").unwrap();
+        }
+
+        let filter = EnvFilter::builder()
+            .with_default_directive(LevelFilter::TRACE.into())
+            .from_env_lossy();
+
+        let (_writer, _guard) = tracing_appender::non_blocking(
+            std::fs::File::options().append(true).open("logs").unwrap(),
+        );
+
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_test_writer()
+                    .with_writer(_writer)
+                    .pretty()
+                    .compact(),
+            )
+            .with(filter)
+            .init();
+
         let client = MangoClient::new().unwrap();
 
         let query = MangaQuery::builder()
@@ -269,29 +297,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_viewer() {
-        {
-            std::fs::File::create("logs").unwrap();
-        }
-
-        let filter = EnvFilter::builder()
-            .with_default_directive(LevelFilter::TRACE.into())
-            .from_env_lossy();
-
-        let (_writer, _guard) = tracing_appender::non_blocking(
-            std::fs::File::options().append(true).open("logs").unwrap(),
-        );
-
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_test_writer()
-                    .with_writer(_writer)
-                    .pretty()
-                    .compact(),
-            )
-            .with(filter)
-            .init();
-
         let client = MangoClient::new().unwrap();
 
         let chainsaw_manga_id = client

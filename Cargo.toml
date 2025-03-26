@@ -1,7 +1,7 @@
 [package]
 name = "mango-api"
 version = "0.1.2"
-edition = "2021"
+edition = "2024"
 readme = "README.md"
 repository = "https://github.com/ArnoDarkrose/mango-api.git"
 license-file = "LICENSE"
@@ -12,7 +12,7 @@ doctest = false
 
 [dependencies]
 async-stream = "0.3.6"
-bon = "3.0.0"
+bon = "3.5.1"
 bytes = "1.8.0"
 futures = "0.3.31"
 kdam = "0.6.0"

@@ -44,33 +44,41 @@ pub struct ServerResponseError {
     context: Option<String>,
 }
 
-/// Custom error type that contains all errors that this can be emitted by this crate's functions
+/// Contains all errors that can be emitted by this crate's functions
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum MangoError {
     #[error(transparent)]
     ReqwestError(#[from] reqwest::Error),
+
     #[error(transparent)]
     RequestWithMiddleWareError(#[from] reqwest_middleware::Error),
+
     #[error(transparent)]
     JsonError(#[from] serde_json::Error),
+
     #[error("error while parsing json value")]
     ParseError,
+
     #[error("104 server response")]
     ConnectionResetByPeerError(Vec<ServerResponseError>),
+
     #[error("400 server response")]
     BadRequestError(Vec<ServerResponseError>),
+
     #[error("404 server response")]
     NotFoundError(Vec<ServerResponseError>),
+
     #[error("403 server respose")]
     ForbiddenError(Vec<ServerResponseError>),
+
     #[error(transparent)]
     QsError(#[from] serde_qs::Error),
+
     #[error(transparent)]
     IoError(#[from] std::io::Error),
 }
 
-/// Type alias for the [`Result`](std::result::Result) that is used in the crate's functions
-pub type Result<T> = std::result::Result<T, Error>;
+pub type MangoResult<T> = std::result::Result<T, MangoError>;
 
 /// [Entity] is implemented for all structs that represent Entity types in terms used by mangadex servers
 pub trait Entity {}
@@ -81,48 +89,42 @@ impl MangoClient {
 
     /// Lowest level function that executes arbitrary [Query] and returnes its response
     #[tracing::instrument]
-    pub async fn query(&self, base_url: &str, query: &impl Query) -> Result<Response> {
+    pub async fn query(&self, base_url: &str, query: &impl Query) -> MangoResult<Response> {
         let query_data = match serde_qs::to_string(query) {
             Ok(res) => res,
-            Err(e) => return Err(Error::QsError(e)),
+            Err(e) => return Err(MangoError::QsError(e)),
         };
 
         let url = format!("{base_url}?{query_data}");
         match self.client.get(url).send().await {
             Ok(res) => Ok(res),
-            Err(e) => Err(Error::RequestWithMiddleWareError(e)),
+            Err(e) => Err(MangoError::RequestWithMiddleWareError(e)),
         }
     }
 
-    /// Deserializes responses that can be deserialized into [Entity] or a [`Vec`] of entities
-    pub async fn parse_respond_data<T>(mut resp: Value) -> Result<T>
+    /// Deserializes responses that can be deserialized into [`Entity`] or a [`Vec`] of entities
+    pub async fn parse_respond_data<T>(mut resp: Value) -> MangoResult<T>
     where
         for<'a> T: Entity + Deserialize<'a> + Serialize,
     {
         let responded_without_errors = resp.response_result_ok()?;
 
         if responded_without_errors {
-            let data = match resp.get_mut("data") {
-                Some(d) => d,
-                None => return Err(Error::ParseError),
-            };
+            let data = resp.get_mut("data").ok_or(MangoError::ParseError)?;
 
             Ok(serde_json::from_value::<T>(data.take())?)
         } else {
-            let errors = match resp.get_mut("errors") {
-                Some(d) => d,
-                None => return Err(Error::ParseError),
-            };
+            let errors = resp.get_mut("errors").ok_or(MangoError::ParseError)?;
 
             let err: Vec<ServerResponseError> = serde_json::from_value(errors.take())?;
 
-            Err(Error::BadRequestError(err))
+            Err(MangoError::BadRequestError(err))
         }
     }
 
     /// Searches for manga with parameteres, specified by data
     #[tracing::instrument]
-    pub async fn search_manga(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
+    pub async fn search_manga(&self, data: &MangaQuery) -> MangoResult<Vec<Manga>> {
         let resp: Value = self
             .query(&format!("{}/manga", MangoClient::BASE_URL), data)
             .await?
@@ -135,7 +137,7 @@ impl MangoClient {
     /// Essentially the same as [`search_manga`](MangoClient::search_manga) but the returned response would also contain information
     /// about covers for each entry
     #[tracing::instrument]
-    pub async fn search_manga_include_cover(&self, data: &MangaQuery) -> Result<Vec<Manga>> {
+    pub async fn search_manga_include_cover(&self, data: &MangaQuery) -> MangoResult<Vec<Manga>> {
         let mut data = data.clone();
         data.includes = Some(serde_json::json!(["cover_art"]));
 
@@ -151,7 +153,10 @@ impl MangoClient {
     /// Executes [`search_manga_include_cover`](MangoClient::search_manga_include_cover) and downloads cover
     /// for each entry. Returns each search entry paired with byte respresentation of its cover
     #[tracing::instrument]
-    pub async fn search_manga_with_cover(&self, data: &MangaQuery) -> Result<Vec<(Manga, Bytes)>> {
+    pub async fn search_manga_with_cover(
+        &self,
+        data: &MangaQuery,
+    ) -> MangoResult<Vec<(Manga, Bytes)>> {
         let resp = self.search_manga_include_cover(data).await?;
 
         let mut res = Vec::new();
@@ -183,7 +188,7 @@ impl MangoClient {
     }
 
     /// Shorthand for searching manga just by name
-    pub async fn search_manga_by_name(&self, name: &str) -> Result<Vec<Manga>> {
+    pub async fn search_manga_by_name(&self, name: &str) -> MangoResult<Vec<Manga>> {
         self.search_manga(&MangaQuery {
             title: Some(name.to_string()),
             ..Default::default()
@@ -193,7 +198,7 @@ impl MangoClient {
 
     /// The same as [`search_manga_by_name`](MangoClient::search_manga_by_name) combined with
     /// [`search_manga_include_cover`](MangoClient::search_manga_include_cover)
-    pub async fn search_manga_by_name_include_cover(&self, name: &str) -> Result<Vec<Manga>> {
+    pub async fn search_manga_by_name_include_cover(&self, name: &str) -> MangoResult<Vec<Manga>> {
         self.search_manga_include_cover(&MangaQuery {
             title: Some(name.to_string()),
             ..Default::default()
@@ -203,7 +208,11 @@ impl MangoClient {
 
     /// Queries for the feed of the manga with the given `id` and parameteres specified by `data`
     #[tracing::instrument]
-    pub async fn get_manga_feed(&self, id: &str, data: &MangaFeedQuery) -> Result<Vec<Chapter>> {
+    pub async fn get_manga_feed(
+        &self,
+        id: &str,
+        data: &MangaFeedQuery,
+    ) -> MangoResult<Vec<Chapter>> {
         let resp: Value = self
             .query(&format!("{}/manga/{id}/feed", MangoClient::BASE_URL), data)
             .await?
@@ -215,7 +224,7 @@ impl MangoClient {
 
     /// Queries for the meta info about downloading chapter with the given `id`
     #[tracing::instrument]
-    pub async fn get_chapter_download_meta(&self, id: &str) -> Result<ChapterDownloadMeta> {
+    pub async fn get_chapter_download_meta(&self, id: &str) -> MangoResult<ChapterDownloadMeta> {
         let mut resp: Value = self
             .query(
                 &format!("{}/at-home/server/{id}", MangoClient::BASE_URL),
@@ -230,15 +239,17 @@ impl MangoClient {
         if responded_without_errors {
             Ok(serde_json::from_value(resp)?)
         } else {
-            Err(Error::BadRequestError(serde_json::from_value::<
+            Err(MangoError::BadRequestError(serde_json::from_value::<
                 Vec<ServerResponseError>,
-            >(resp["errors"].take())?))
+            >(
+                resp["errors"].take()
+            )?))
         }
     }
 
     /// Queries for the info about the scanlation group with the specified `id`
     #[tracing::instrument(skip(self))]
-    pub async fn get_scanlation_group(&self, id: &str) -> Result<ScanlationGroup> {
+    pub async fn get_scanlation_group(&self, id: &str) -> MangoResult<ScanlationGroup> {
         let resp: Value = self
             .query(
                 &format!("{}/group/{id}", MangoClient::BASE_URL),
@@ -252,7 +263,7 @@ impl MangoClient {
     }
 
     /// Queries for available tags
-    pub async fn get_tags(&self) -> Result<Vec<Tag>> {
+    pub async fn get_tags(&self) -> MangoResult<Vec<Tag>> {
         let resp: Value = self
             .query(
                 &format!("{}/manga/tag", MangoClient::BASE_URL),
@@ -268,7 +279,11 @@ impl MangoClient {
     /// Given the name of the cover filename (on mangadex server) and the manga `id`,
     /// downloads the needed cover art
     #[tracing::instrument(skip(self))]
-    pub async fn download_full_cover(&self, manga_id: &str, cover_filename: &str) -> Result<Bytes> {
+    pub async fn download_full_cover(
+        &self,
+        manga_id: &str,
+        cover_filename: &str,
+    ) -> MangoResult<Bytes> {
         let url = format!("https://uploads.mangadex.org/covers/{manga_id}/{cover_filename}");
 
         let resp = self.query(&url, &EmptyQuery {}).await?;
@@ -279,22 +294,22 @@ impl MangoClient {
 
         match resp.bytes().await {
             Ok(res) => Ok(res),
-            Err(e) => Err(Error::ReqwestError(e)),
+            Err(e) => Err(MangoError::ReqwestError(e)),
         }
     }
 
     /// Shorthand for deserializing server error response
-    async fn deserialize_reponse_error<T: std::fmt::Debug>(resp: Response) -> Result<T> {
+    async fn deserialize_reponse_error<T: std::fmt::Debug>(resp: Response) -> MangoResult<T> {
         let status = resp.status();
 
         let errors = resp.json::<Value>().await?["errors"].take();
         let e: Vec<ServerResponseError> = serde_json::from_value(errors)?;
 
         let res = match status.as_str() {
-            "400" => Err(Error::BadRequestError(e)),
-            "403" => Err(Error::ForbiddenError(e)),
-            "404" => Err(Error::NotFoundError(e)),
-            "104" => Err(Error::ConnectionResetByPeerError(e)),
+            "400" => Err(MangoError::BadRequestError(e)),
+            "403" => Err(MangoError::ForbiddenError(e)),
+            "404" => Err(MangoError::NotFoundError(e)),
+            "104" => Err(MangoError::ConnectionResetByPeerError(e)),
             _ => {
                 unreachable!()
             }
@@ -307,7 +322,7 @@ impl MangoClient {
 
     /// Downloads page from the specified `url`
     #[tracing::instrument]
-    pub async fn download_full_page(&self, url: &str) -> Result<Bytes> {
+    pub async fn download_full_page(&self, url: &str) -> MangoResult<Bytes> {
         let resp = self.query(url, &EmptyQuery {}).await?;
 
         if resp.status() != StatusCode::OK {
@@ -317,7 +332,7 @@ impl MangoClient {
         } else {
             match resp.bytes().await {
                 Ok(res) => Ok(res),
-                Err(e) => Err(Error::ReqwestError(e)),
+                Err(e) => Err(MangoError::ReqwestError(e)),
             }
         }
     }
@@ -325,7 +340,7 @@ impl MangoClient {
     /// Queries for chunked downloading of the page from the specified `url`.
     /// The returned [Response] can then be used to download the page chunk by chunk    
     #[tracing::instrument]
-    pub async fn get_page_chunks(&self, url: &str) -> Result<Response> {
+    pub async fn get_page_chunks(&self, url: &str) -> MangoResult<Response> {
         let resp = self.query(url, &EmptyQuery {}).await?;
 
         if resp.status() != StatusCode::OK {
@@ -345,7 +360,7 @@ impl MangoClient {
         &self,
         chapter_id: &str,
         mut max_concurrent_downloads: usize,
-    ) -> Result<PathBuf> {
+    ) -> MangoResult<PathBuf> {
         max_concurrent_downloads = max_concurrent_downloads.max(1);
 
         let download_meta = self
